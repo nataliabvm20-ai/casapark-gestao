@@ -1551,12 +1551,15 @@ async function carregarBI(forcar, silencioso){
   try {
     let dados;
     if(fonte === "instagram"){
-      const [conta, posts, seg] = await Promise.all([
-        get({connector: "instagram", date_preset: `last_${n * 2}d`, fields: ["date","reach","views","accounts_engaged","total_interactions","follower_count_1d","likes","comments","saves","shares","profile_links_taps"]}),
+      // o Instagram só entrega seguidores por dia dos últimos 30 dias: essa série vem numa consulta à parte
+      const [conta, posts, seg, novos] = await Promise.all([
+        get({connector: "instagram", date_preset: `last_${n * 2}d`, fields: ["date","reach","views","accounts_engaged","total_interactions","likes","comments","saves","shares","profile_links_taps"]}),
         get({connector: "instagram", date_preset: `last_${Math.max(n, 30)}d`, fields: ["media_id","timestamp","media_type","media_product_type","media_caption","media_permalink","media_reach","media_views","media_engagement","media_saved","media_shares","media_like_count","media_comments_count"]}),
         get({connector: "instagram", date_preset: "last_7d", fields: ["followers_count","media_count","username"]}),
+        get({connector: "instagram", date_preset: "last_30d", fields: ["date","follower_count_1d"]}).catch(() => ({linhas: []})),
       ]);
-      dados = {conta: conta.linhas.map(r => ({...r, d: dataISO(r.date)})).filter(r => r.d).sort((a, b) => a.d - b.d),
+      const segDia = Object.fromEntries(novos.linhas.map(r => [String(r.date).slice(0, 10), r.follower_count_1d]));
+      dados = {conta: conta.linhas.map(r => ({...r, follower_count_1d: segDia[String(r.date).slice(0, 10)], d: dataISO(r.date)})).filter(r => r.d).sort((a, b) => a.d - b.d),
         posts: posts.linhas.filter(p => p.media_product_type !== "AD").map(p => ({...p, t: horaBSB(p.timestamp)})).filter(p => p.t).sort((a, b) => b.t - a.t),
         seg: seg.linhas[0] || null, quando: Math.min(conta.storedAt, posts.storedAt), vazio: !conta.linhas.length && !posts.linhas.length};
     } else if(fonte === "google_ads"){
