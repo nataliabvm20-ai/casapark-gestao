@@ -181,14 +181,18 @@
     D.arquivos = Object.fromEntries(arqs.filter(a => a.nome.endsWith(".csv")).map(a => [a.nome, a.conteudo]));
     const ult = arqs.reduce((m, a) => a.atualizado_em > m ? a.atualizado_em : m, "");
     D.gerado_em = ult ? new Date(ult).toLocaleString("pt-BR", {day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit"}) : "";
-    await juntarAgendaGoogle(D);
+    juntarAgendaGoogle(D, await buscarGoogle());
     window.__DADOS__ = D;
     assinatura = arqs.map(a => a.nome + a.versao).sort().join("|");
     await carregarAjustes();
   }
-  /* ---------- Google Agenda → calendário do sistema ---------- */
-  const CAT_AGENDA = {"Casapark Prime": "Casapark Prime", "Espaço Casa": "Espaço Casa / Arquitetos"};
-  const PALAVRAS_FRACAS = new Set(["casapark","evento","eventos","talk","visita","reuniao","semana","casa","prime","campanha","exposicao","feira"]);
+  /* ---------- Google Agenda → calendário do sistema ----------
+     O Google manda nas datas: o que mudar lá aparece aqui. As planilhas de calendário (se carregadas)
+     só dão a classificação e o ID que liga o item às tarefas. Itens futuros apagados no Google somem daqui. */
+  const CAT_AGENDA = {"Casapark Prime": "Casapark Prime", "Espaço Casa": "Espaço Casa / Arquitetos", "Eventos externos": "Agenda externa"};
+  const FMT_AGENDA = {"Espaço Casa": "Talk", "Eventos externos": "Mercado"};
+  const AGENDA_CSV = {"casapark": "Agenda Casapark", "agenda casapark": "Agenda Casapark", "casapark prime": "Casapark Prime", "espaco casa": "Espaço Casa", "eventos externos": "Eventos externos"};
+  const PALAVRAS_FRACAS = new Set(["casapark","evento","eventos","talk","talks","visita","reuniao","semana","casa","prime","campanha","exposicao","feira","mensal","definir","tema","palestrante","confirmar"]);
   const semAcento = t => String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
   const palavras = t => semAcento(t).split(/[^a-z0-9]+/).filter(w => w.length >= 4 && !PALAVRAS_FRACAS.has(w));
   function linhasCSV(txt){
@@ -204,29 +208,137 @@
   const dataBR = iso => iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4);
   const isoDeBR = br => { const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(br || ""); return m ? `${m[3]}-${m[2]}-${m[1]}` : (br || "").slice(0, 10); };
   const campoCSV = v => { v = String(v ?? ""); return /[;"\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const somaDias = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return isoLocal(d); };
+  const distDias = (a, b) => Math.round((Date.parse(a + "T12:00:00") - Date.parse(b + "T12:00:00")) / 864e5);
+  const hashId = t => { let h = 2166136261; for(const c of String(t)){ h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
+
+  // mesma limpeza de nomes do casapark.py (para achar o nome no dicionário de padronização)
+  function limparNome(bruto){
+    let s = String(bruto || "").trim().replace(/°/g, "º"), hora = "";
+    s = s.replace(/^\[\s*prov(?:ável|avel)?\s*\]\s*[-–:]?\s*|^prov(?:ável|avel)?\s*[-–:]\s*/i, "").replace(/\s*\[prov\]\s*$/i, "");
+    s = s.replace(/^\[espaço casa\]\s*[-–]\s*/i, "");
+    const m = /^(\d{1,2})h(\d{2})?\s*[-–]?\s*/.exec(s);
+    if(m){ hora = String(m[1]).padStart(2, "0") + ":" + (m[2] || "00"); s = s.slice(m[0].length); }
+    s = s.replace(/^\d{1,2}\s*e\s*\d{1,2}\/\d{2}\s*\|\s*/, "").replace(/\s*[-–]\s*$/, "").replace(/\s+/g, " ").trim();
+    return {nome: s, hora};
+  }
+  const chave = t => limparNome(t).nome.toLowerCase().replace(/[–—]/g, "-").replace(/\s+/g, " ").trim();
+  function formatoPorTitulo(t){
+    const s = semAcento(t);
+    if(/fechamento/.test(s)) return "Fechamento";
+    if(/briefing/.test(s)) return "Briefing";
+    if(/viagem/.test(s)) return "Viagem";
+    if(/reuniao|alinhamento|treinamento/.test(s)) return "Reunião";
+    if(/talk|palestra|hacks|visita guiada|workshop|aula/.test(s)) return "Talk";
+    if(/gravacao|producao|video|fotos?\b|ensaio/.test(s)) return "Produção";
+    if(/montagem|acabamento|decoracao/.test(s)) return "Montagem";
+    if(/feira|vintage|panela|cinematerna|motim|fuga/.test(s)) return "Feira";
+    return "";
+  }
+
+  // feriados e datas comerciais (mesma regra do casapark.py), usados só nos anos sem planilha de calendário
+  function pascoa(ano){
+    const a = ano % 19, b = Math.floor(ano / 100), c = ano % 100, d = Math.floor(b / 4), e = b % 4;
+    const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const mes = Math.floor((h + l - 7 * m + 114) / 31), dia = (h + l - 7 * m + 114) % 31 + 1;
+    return isoLocal(new Date(ano, mes - 1, dia, 12));
+  }
+  const enesimo = (ano, mes, diaSemana, n) => { const d = new Date(ano, mes - 1, 1, 12); d.setDate(1 + (diaSemana - d.getDay() + 7) % 7 + 7 * (n - 1)); return isoLocal(d); };
+  function linhasRegra(ano){
+    const p = pascoa(ano), dt = (m, d) => `${ano}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const L = [
+      [dt(1, 1), "Confraternização Universal", "Feriado"], [somaDias(p, -48), "Carnaval (segunda)", "Feriado"],
+      [somaDias(p, -47), "Carnaval (terça)", "Feriado"], [somaDias(p, -46), "Quarta-feira de Cinzas", "Ponto facultativo"],
+      [somaDias(p, -2), "Sexta-feira Santa", "Feriado"], [dt(4, 21), "Tiradentes e aniversário de Brasília", "Feriado"],
+      [dt(5, 1), "Dia do Trabalho", "Feriado"], [enesimo(ano, 5, 0, 2), "Dia das Mães", "Data comercial"],
+      [somaDias(p, 60), "Corpus Christi", "Feriado"], [dt(6, 12), "Dia dos Namorados", "Data comercial"],
+      [enesimo(ano, 8, 0, 2), "Dia dos Pais", "Data comercial"], [dt(9, 7), "Independência do Brasil", "Feriado"],
+      [dt(10, 12), "Nossa Senhora Aparecida e Dia das Crianças", "Feriado"], [dt(11, 2), "Finados", "Feriado"],
+      [dt(11, 15), "Proclamação da República", "Feriado"], [dt(11, 20), "Dia da Consciência Negra", "Feriado"],
+      [somaDias(enesimo(ano, 11, 4, 4), 1), "Black Friday", "Data comercial"], [dt(11, 30), "Dia do Evangélico (DF)", "Feriado"],
+      [dt(12, 25), "Natal", "Feriado"],
+    ].sort((x, y) => x[0].localeCompare(y[0]));
+    const linhas = L.map(([d, nome, fmt], k) => [`F${ano}-${k + 1}`, dataBR(d), dataBR(d), "", nome, "Feriado", fmt, "", "anual", "calendário oficial", "", "confirmada", "", "", "", "", ""]);
+    linhas.push([`C${ano}-1`, dataBR(dt(1, 1)), dataBR(dt(6, 30)), "", "Ciclo de pontuação Prime – 1º semestre", "Casapark Prime", "Ciclo", "", "semestral", "1º semestre", "", "a confirmar", "", "", "", "", ""]);
+    linhas.push([`C${ano}-2`, dataBR(dt(7, 1)), dataBR(dt(12, 31)), "", "Ciclo de pontuação Prime – 2º semestre", "Casapark Prime", "Ciclo", "", "semestral", "2º semestre", "", "a confirmar", "", "", "", "", ""]);
+    return linhas.map(l => l.map(campoCSV).join(";"));
+  }
+
   window.AGENDA_GOOGLE = {estado: "não configurada", avisos: [], total: 0, iguais: 0};
-  async function juntarAgendaGoogle(D){
-    let r;
-    try { r = await sb.functions.invoke("agenda-google", {body: {}}); } catch(e){ r = {error: e}; }
-    if(r.error || !r.data){ window.AGENDA_GOOGLE = {estado: "indisponível", avisos: [], total: 0, iguais: 0}; return; }
-    const {eventos = [], avisos = [], configuradas = []} = r.data;
+  let assinaturaGoogle = "", googleEm = 0;
+  async function buscarGoogle(){
+    googleEm = Date.now();
+    try { const r = await sb.functions.invoke("agenda-google", {body: {}}); return (r.error || !r.data) ? null : r.data; } catch(e){ return null; }
+  }
+  function juntarAgendaGoogle(D, g){
+    if(!g){ window.AGENDA_GOOGLE = {estado: "indisponível", avisos: [], total: 0, iguais: 0}; return; }
+    const {eventos = [], avisos = [], configuradas = []} = g;
+    const lidas = g.lidas || configuradas.filter(n => !avisos.some(a => a.startsWith(n + ":")));
+    assinaturaGoogle = JSON.stringify(eventos);
     if(!configuradas.length){ window.AGENDA_GOOGLE = {estado: "não configurada", avisos, total: 0, iguais: 0}; return; }
-    // itens que já estão no calendário do sistema: não duplicar
-    const existentes = [];
-    Object.entries(D.arquivos).filter(([n]) => /^calendario_casapark_\d{4}\.csv$/.test(n)).forEach(([, txt]) => {
-      const L = linhasCSV(txt); const cab = L[0] || []; const iI = cab.indexOf("Início"), iF = cab.indexOf("Fim"), iN = cab.indexOf("Item");
-      L.slice(1).forEach(l => existentes.push({ini: isoDeBR(l[iI]), fim: isoDeBR(l[iF] || l[iI]), w: palavras(l[iN])}));
+
+    // dicionário de padronização (opcional, carregado como planilha)
+    const dic = {};
+    if(D.arquivos["dicionario_padronizacao.csv"]){
+      const L = linhasCSV(D.arquivos["dicionario_padronizacao.csv"]), c = L[0] || [], ix = n => c.indexOf(n);
+      L.slice(1).forEach(l => { const k = chave(l[ix("nome_original")]); if(k && !dic[k]) dic[k] = {item: l[ix("nome_padronizado")], formato: l[ix("formato")], categoria: l[ix("categoria")], campanha: l[ix("campanha")], fornecedor: l[ix("fornecedor")], lojas: l[ix("lojas")], acao: l[ix("acao")]}; });
+    }
+    const evs = eventos.map(ev => {
+      const t = ev.tags || {}, p = dic[chave(ev.titulo)], ln = limparNome(ev.titulo);
+      if(p && p.acao === "remover") return null;
+      const item = (p && p.item) || (ln.nome ? ln.nome[0].toUpperCase() + ln.nome.slice(1) : ev.titulo);
+      return {...ev, t, item, hora: ev.hora || ln.hora,
+        cat: t.categoria || (p && p.categoria) || CAT_AGENDA[ev.agenda] || "Evento próprio",
+        fmt: t.formato || (p && p.formato) || formatoPorTitulo(ev.titulo) || FMT_AGENDA[ev.agenda] || "Evento",
+        campanha: t.campanha || (p && p.campanha) || "", fornecedor: t.fornecedor || (p && p.fornecedor) || "",
+        lojas: t.lojas || (p && p.lojas) || "", resp: t.responsavel || "",
+        w: [...new Set([...palavras(item), ...palavras(ev.titulo)])], usado: false};
+    }).filter(Boolean);
+
+    const hoje = isoLocal(new Date()), limite = somaDias(hoje, 440);
+    let iguais = 0, atualizados = 0, removidos = 0;
+    const anosCSV = new Set();
+    Object.keys(D.arquivos).filter(n => /^calendario_casapark_\d{4}\.csv$/.test(n)).forEach(nome => {
+      anosCSV.add(nome.slice(20, 24));
+      const L = linhasCSV(D.arquivos[nome]); const cab = L[0] || []; const ix = n => cab.indexOf(n);
+      const iI = ix("Início"), iF = ix("Fim"), iH = ix("Hora"), iN = ix("Item"), iA = ix("Agenda"), iS = ix("Status da data"), iID = ix("ID"), iC = ix("Categoria"), iFo = ix("Formato");
+      const manter = [cab];
+      L.slice(1).forEach(l => {
+        if(l[iC] === "Feriado" || l[iFo] === "Ciclo"){ manter.push(l); return; }
+        const ini = isoDeBR(l[iI]), fim = isoDeBR(l[iF] || l[iI]), w = palavras(l[iN]);
+        let ev = evs.find(e => !e.usado && e.t.idSistema && e.t.idSistema === l[iID]);
+        if(!ev && w.length){
+          const nomeCSV = semAcento(l[iN]).trim();
+          // mesma palavra-chave e mesmas datas (ou até 3 dias de diferença); mesmo nome exato: até 31 dias (evento remarcado)
+          const cand = evs.filter(e => !e.usado && e.w.some(p => w.includes(p)) && ((e.inicio <= fim && e.fim >= ini) || Math.abs(distDias(e.inicio, ini)) <= (semAcento(e.item).trim() === nomeCSV && e.rec === "pontual" ? 31 : 3)));
+          cand.sort((a, b) => Math.abs(distDias(a.inicio, ini)) - Math.abs(distDias(b.inicio, ini)));
+          ev = cand[0];
+        }
+        const origem = AGENDA_CSV[semAcento(l[iA]).trim()];
+        if(ev){
+          ev.usado = true; iguais++;
+          if(ev.inicio !== ini || ev.fim !== fim || (ev.hora && ev.hora !== l[iH])){ l[iI] = dataBR(ev.inicio); l[iF] = dataBR(ev.fim); if(ev.hora && iH >= 0) l[iH] = ev.hora; atualizados++; }
+          if(iS >= 0) l[iS] = ev.status;
+          if(iA >= 0) l[iA] = "Google · " + ev.agenda;
+          manter.push(l); return;
+        }
+        // veio de uma agenda do Google que foi lida, a data ainda não passou e o evento não está mais lá: foi apagado
+        if(origem && lidas.includes(origem) && ini >= hoje && ini <= limite){ removidos++; return; }
+        manter.push(l);
+      });
+      D.arquivos[nome] = manter.map(l => l.map(campoCSV).join(";")).join("\r\n");
     });
-    const repetido = ev => { const w = palavras(ev.titulo); if(!w.length) return false;
-      return existentes.some(x => x.ini <= ev.fim && x.fim >= ev.inicio && x.w.some(p => w.includes(p))); };
+
     const cab = ["ID","Início","Fim","Hora","Item","Categoria","Formato","Campanha","Recorrência","Regra de data","Referência ano anterior","Status da data","Responsável","Fornecedor","Lojas participantes","Agenda","Observações"];
-    let iguais = 0; const linhas = [];
-    eventos.forEach((ev, k) => {
-      if(repetido(ev)){ iguais++; return; }
-      linhas.push(["G-" + (k + 1), dataBR(ev.inicio), dataBR(ev.fim), ev.hora || "", ev.titulo, CAT_AGENDA[ev.agenda] || "Agenda externa", "Agenda", "", "pontual", "", "", "confirmada", "", "", "", "Google · " + ev.agenda, ev.local || ""].map(campoCSV).join(";"));
-    });
+    const linhas = evs.filter(e => !e.usado).map(e => ["G-" + hashId(e.id), dataBR(e.inicio), dataBR(e.fim), e.hora || "", e.item, e.cat, e.fmt, e.campanha, e.rec || "pontual", "", "", e.status || "confirmada", e.resp, e.fornecedor, e.lojas, "Google · " + e.agenda, e.local || ""].map(campoCSV).join(";"));
+    const total = linhas.length;
+    const anos = new Set([hoje.slice(0, 4), somaDias(hoje, 365).slice(0, 4), ...eventos.map(e => e.inicio.slice(0, 4))]);
+    [...anos].sort().forEach(a => { if(!anosCSV.has(a)) linhas.push(...linhasRegra(+a)); });
     D.arquivos["calendario_google.csv"] = [cab.join(";"), ...linhas].join("\r\n");
-    window.AGENDA_GOOGLE = {estado: "conectada", avisos, total: linhas.length, iguais, agendas: configuradas};
+    window.AGENDA_GOOGLE = {estado: "conectada", avisos, total, iguais, atualizados, removidos, agendas: configuradas, lidas};
+    if(avisos.length) console.warn("Agenda Google:", avisos.join(" | "));
   }
 
   async function carregarAjustes(){
@@ -277,6 +389,7 @@
       const {error} = await sb.from("arquivos").upsert(mud.map(([nome, conteudo]) => ({empresa_id: window.PERFIL.empresa_id, nome, conteudo})));
       if(error) throw error;
       if(window.toast) toast(`${mud.length} planilha(s) salva(s) para toda a equipe`);
+      setTimeout(() => sincronizar(true), 300);   // junta de novo com a Agenda do Google
     }).catch(avisarErro);
   }
 
@@ -287,7 +400,9 @@
     try {
       const {data: arqs} = await sb.from("arquivos").select("nome, versao");
       const nova = (arqs || []).map(a => a.nome + a.versao).sort().join("|");
-      if(forcar || (arqs && nova !== assinatura)){ await carregarDados(window.PERFIL); if(typeof iniciar === "function") iniciar(); }
+      let mudouGoogle = false;
+      if(!forcar && Date.now() - googleEm > 5 * 60e3){ const g = await buscarGoogle(); mudouGoogle = !!g && JSON.stringify(g.eventos || []) !== assinaturaGoogle; }
+      if(forcar || mudouGoogle || (arqs && nova !== assinatura)){ await carregarDados(window.PERFIL); if(typeof iniciar === "function") iniciar(); }
       else { const antes = assinaturaAjustes(); await carregarAjustes(); if(assinaturaAjustes() !== antes && typeof recarregar === "function") recarregar(); }
     } catch(e){}
     sincronizando = false;

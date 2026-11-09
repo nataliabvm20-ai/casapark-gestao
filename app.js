@@ -1059,7 +1059,8 @@ async function carregarArquivos(files){
   const novos = {}; const erros = [];
   for(const f of files){
     const txt = await f.text(); const linhas = lerCSV(txt); const cab = linhas[0] ? Object.keys(linhas[0]) : [];
-    if(cab.includes("id_tarefa")) novos["base_gestao.csv"] = txt;
+    if(cab.includes("nome_original") && cab.includes("nome_padronizado")) novos["dicionario_padronizacao.csv"] = txt;
+    else if(cab.includes("id_tarefa")) novos["base_gestao.csv"] = txt;
     else if(cab.includes("Loja")) novos["lojas_casapark.csv"] = txt;
     else if(cab.length === 1 && cab[0] === "Nome") novos["equipe_casapark.csv"] = txt;
     else if(cab.includes("Fornecedor") && cab.includes("Papel")) novos["fornecedores_casapark.csv"] = txt;
