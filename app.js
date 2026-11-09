@@ -1487,64 +1487,110 @@ try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", apli
    ===================================================================== */
 const WINDSOR = "Windsor.ai";
 ABAS.find(a => a.id === "redes").nome = "Pauta das redes";
-ABAS.push({id:"bi", nome:"BI de redes", ico:"i-bi", sub:"Resultados do Instagram ao vivo pelo Windsor.ai, cruzados com o calendário."});
+ABAS.push({id:"bi", nome:"BI de redes", ico:"i-bi", sub:"Instagram, Facebook, Google Ads e Meta Ads ao vivo pelo Windsor.ai, cruzados com o calendário."});
 ORDEM_ABAS.splice(2, 0, "bi");
 GRUPO_ABA.bi = "Visão";
 ABAS.sort((a, b) => ORDEM_ABAS.indexOf(a.id) - ORDEM_ABAS.indexOf(b.id));
 ABAS.forEach(a => { a.grupo = GRUPO_ABA[a.id]; });
 VISTAS.bi = vBI;
 
-const BI = {dias: LS.get("bi-dias", 30), estado: "ocioso", erro: null, conta: null, posts: null, seg: null, quando: null, chave: null, ord: "engaj"};
+const BI = {dias: LS.get("bi-dias", 30), fonte: LS.get("bi-fonte", "instagram"), estado: "ocioso", erro: null, conta: null, posts: null, seg: null, quando: null, chave: null, ord: "engaj", src: {}};
 const FONTES_BI = [
-  {id:"instagram", nome:"Instagram", ativo:true},
-  {id:"facebook_organic", nome:"Facebook", ativo:false},
-  {id:"facebook", nome:"Meta Ads", ativo:false},
-  {id:"tiktok_organic", nome:"TikTok", ativo:false},
+  {id:"instagram", nome:"Instagram"},
+  {id:"google_ads", nome:"Google Ads"},
+  {id:"facebook", nome:"Meta Ads"},
+  {id:"facebook_organic", nome:"Facebook"},
 ];
+if(!FONTES_BI.some(f => f.id === BI.fonte)) BI.fonte = "instagram";
 const espera = ms => new Promise(r => setTimeout(r, ms));
 const fmtN = n => (n == null || isNaN(n)) ? "—" : Math.round(n).toLocaleString("pt-BR");
 const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(1).replace(".", ",") + " mi" : n >= 1e4 ? Math.round(n / 1e3) + " mil" : fmtN(n);
 const fmtP = (n, c = 1) => (n == null || !isFinite(n)) ? "—" : (n * 100).toFixed(c).replace(".", ",") + "%";
+const fmtR = (n, c = 2) => (n == null || !isFinite(n)) ? "—" : "R$ " + n.toLocaleString("pt-BR", {minimumFractionDigits: c, maximumFractionDigits: c});
+const fmtRk = n => (n == null || !isFinite(n)) ? "—" : n >= 1e4 ? "R$ " + fmtK(n) : fmtR(n, n >= 1000 ? 0 : 2);
 const dataISO = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
 const horaBSB = ts => { const d = new Date(ts); return isNaN(d) ? null : new Date(d.getTime() - 3 * 3600e3); };   // America/Sao_Paulo (UTC−3)
 
-async function windsor(mcp, input){
+// No sistema com login os dados vêm da função segura do servidor (window.__WINDSOR__).
+// Na versão aberta dentro do Claude, vêm do conector Windsor.ai de quem está vendo.
+async function windsorMCP(mcp, input){
   // o Windsor pode responder "pending" enquanto monta o relatório: repete a mesma chamada
   for(let i = 0; i < 8; i++){
-    const r = await mcp.callTool(WINDSOR, "get_data", input, {cache: {staleTime: 10 * 60e3, gcTime: 24 * 3600e3}});
+    const r = await mcp.callTool(WINDSOR, "get_data", input, {cache: {staleTime: 5 * 60e3, gcTime: 24 * 3600e3}});
     const p = r.payload || {};
-    if(p.status && p.status !== "done"){ BI.estado = "gerando"; render(); await espera(Math.min((p.poll_after_seconds || 10) * 1000, 30000)); continue; }
+    if(p.status && p.status !== "done"){ await espera(Math.min((p.poll_after_seconds || 10) * 1000, 30000)); continue; }
     return {linhas: Array.isArray(p.data) ? p.data : [], storedAt: r.cache ? r.cache.storedAt : Date.now()};
   }
   throw {code: "pendente", message: "O Windsor ainda está gerando o relatório."};
 }
-async function carregarBI(forcar){
-  const chave = BI.dias + "";
-  if(!forcar && BI.chave === chave && ["pronto","carregando","gerando","erro","sem-mcp"].includes(BI.estado)) return;
-  BI.chave = chave; BI.estado = "carregando"; BI.erro = null; if(S.aba === "bi") render();
+async function acessoDados(forcar){
+  if(typeof window.__WINDSOR__ === "function") return input => window.__WINDSOR__({...input, forcar: !!forcar});
   let mcp = null;
   try { mcp = window.claude && await window.claude.use("mcp"); } catch(e){ mcp = null; }
-  if(!mcp){ BI.estado = "sem-mcp"; if(S.aba === "bi") render(); return; }
+  if(!mcp) return null;
   if(forcar){ try { await mcp.invalidate(WINDSOR, "get_data"); } catch(e){} }
-  const n = BI.dias;
+  return input => windsorMCP(mcp, input);
+}
+// tenta os campos completos; se o Windsor recusar algum campo, tenta o conjunto mínimo
+async function comReserva(get, input, minimo){
+  try { return await get(input); }
+  catch(e){ if(!minimo || ["sem_chave","sessao","mfa","inativo","server_not_connected","needs_reauth","approval_required","consent_required","not_in_manifest","blocked_by_policy"].includes(e && e.code)) throw e; return await get({...input, fields: minimo}); }
+}
+const st = id => (BI.src[id] ||= {estado: "ocioso"});
+
+async function carregarBI(forcar, silencioso){
+  const fonte = BI.fonte, n = BI.dias, chave = fonte + "|" + n, s = st(fonte);
+  if(!forcar && s.chave === chave && ["pronto","carregando","erro","sem-mcp","vazio"].includes(s.estado)) return;
+  if(s.estado === "carregando" && s.chave === chave) return;
+  const tinha = s.estado === "pronto" && s.chave === chave;
+  s.chave = chave; s.erro = null;
+  if(silencioso && tinha) s.atualizando = true; else s.estado = "carregando";
+  if(S.aba === "bi") render();
+  const get = await acessoDados(forcar);
+  if(!get){ s.estado = "sem-mcp"; s.atualizando = false; if(S.aba === "bi") render(); return; }
   try {
-    const [conta, posts, seg] = await Promise.all([
-      windsor(mcp, {connector: "instagram", date_preset: `last_${n * 2}d`, fields: ["date","reach","views","accounts_engaged","total_interactions","follower_count_1d","likes","comments","saves","shares","profile_links_taps"]}),
-      windsor(mcp, {connector: "instagram", date_preset: `last_${Math.max(n, 30)}d`, fields: ["media_id","timestamp","media_type","media_product_type","media_caption","media_permalink","media_reach","media_views","media_engagement","media_saved","media_shares","media_like_count","media_comments_count"]}),
-      windsor(mcp, {connector: "instagram", date_preset: "last_7d", fields: ["followers_count","media_count","username"]}),
-    ]);
-    if(BI.chave !== chave) return;
-    BI.conta = conta.linhas.map(r => ({...r, d: dataISO(r.date)})).filter(r => r.d).sort((a, b) => a.d - b.d);
-    BI.posts = posts.linhas.filter(p => p.media_product_type !== "AD").map(p => ({...p, t: horaBSB(p.timestamp)})).filter(p => p.t).sort((a, b) => b.t - a.t);
-    BI.seg = seg.linhas[0] || null;
-    BI.quando = Math.min(conta.storedAt, posts.storedAt);
-    BI.estado = "pronto";
+    let dados;
+    if(fonte === "instagram"){
+      const [conta, posts, seg] = await Promise.all([
+        get({connector: "instagram", date_preset: `last_${n * 2}d`, fields: ["date","reach","views","accounts_engaged","total_interactions","follower_count_1d","likes","comments","saves","shares","profile_links_taps"]}),
+        get({connector: "instagram", date_preset: `last_${Math.max(n, 30)}d`, fields: ["media_id","timestamp","media_type","media_product_type","media_caption","media_permalink","media_reach","media_views","media_engagement","media_saved","media_shares","media_like_count","media_comments_count"]}),
+        get({connector: "instagram", date_preset: "last_7d", fields: ["followers_count","media_count","username"]}),
+      ]);
+      dados = {conta: conta.linhas.map(r => ({...r, d: dataISO(r.date)})).filter(r => r.d).sort((a, b) => a.d - b.d),
+        posts: posts.linhas.filter(p => p.media_product_type !== "AD").map(p => ({...p, t: horaBSB(p.timestamp)})).filter(p => p.t).sort((a, b) => b.t - a.t),
+        seg: seg.linhas[0] || null, quando: Math.min(conta.storedAt, posts.storedAt), vazio: !conta.linhas.length && !posts.linhas.length};
+    } else if(fonte === "google_ads"){
+      const [dia, disp] = await Promise.all([
+        get({connector: "google_ads", date_preset: `last_${n * 2}d`, fields: ["date","campaign","campaign_status","advertising_channel_type","impressions","clicks","spend","conversions"]}),
+        get({connector: "google_ads", date_preset: `last_${n}d`, fields: ["device","impressions","clicks","spend","conversions"]}),
+      ]);
+      dados = {linhas: dia.linhas.map(r => ({...r, d: dataISO(r.date)})).filter(r => r.d), seg: disp.linhas, quando: dia.storedAt, vazio: !dia.linhas.length};
+    } else if(fonte === "facebook"){
+      const dia = await comReserva(get, {connector: "facebook", date_preset: `last_${n * 2}d`, fields: ["date","campaign","campaign_status","impressions","reach","clicks","spend"]}, ["date","campaign","impressions","clicks","spend"]);
+      dados = {linhas: dia.linhas.map(r => ({...r, d: dataISO(r.date)})).filter(r => r.d), seg: null, quando: dia.storedAt, vazio: !dia.linhas.length};
+    } else {
+      const [dia, posts] = await Promise.all([
+        comReserva(get, {connector: "facebook_organic", date_preset: `last_${n * 2}d`, fields: ["date","page_follows","page_daily_follows","page_impressions","page_total_media_view_unique","page_post_engagements","page_views_total"]}, ["date","page_impressions","page_post_engagements"]),
+        comReserva(get, {connector: "facebook_organic", date_preset: `last_${Math.max(n, 30)}d`, fields: ["post_id","post_created_time","post_message","permalink_url","post_impressions","post_reactions_no_shares","post_comments_total","post_activity_by_action_type_share","post_clicks"]}, ["post_id","post_created_time","post_message","permalink_url","post_impressions"]).catch(() => ({linhas: [], storedAt: Date.now()})),
+      ]);
+      dados = {conta: dia.linhas.map(r => ({...r, d: dataISO(r.date)})).filter(r => r.d).sort((a, b) => a.d - b.d),
+        posts: posts.linhas.map(p => ({...p, t: horaBSB(p.post_created_time)})).filter(p => p.t).sort((a, b) => b.t - a.t), quando: dia.storedAt, vazio: !dia.linhas.length};
+    }
+    if(s.chave !== chave) return;
+    Object.assign(s, dados, {estado: dados.vazio ? "vazio" : "pronto", atualizando: false, quando: dados.quando || Date.now()});
+    if(fonte === "instagram"){ BI.conta = dados.conta; BI.posts = dados.posts; BI.seg = dados.seg; BI.quando = s.quando; }
   } catch(e){
-    if(BI.chave !== chave) return;
-    BI.estado = "erro"; BI.erro = e || {code: "upstream_error"};
+    if(s.chave !== chave) return;
+    s.atualizando = false;
+    const naoConectado = e && (["permission_denied","not_found"].includes(e.code) || /no .* accounts? (are )?configured|not connected/i.test(e.message || ""));
+    if(naoConectado){ s.estado = "vazio"; }
+    else if(tinha){ s.erroSilencioso = e; }   // mantém os números anteriores na tela
+    else { s.estado = "erro"; s.erro = e || {code: "upstream_error"}; }
   }
   if(S.aba === "bi") render();
 }
+// atualização automática enquanto a aba está aberta
+setInterval(() => { if(S.aba === "bi" && document.visibilityState === "visible" && st(BI.fonte).estado === "pronto") carregarBI(true, true); }, 5 * 60e3);
 function mensagemErro(e){
   const c = e && e.code;
   const m = {
@@ -1557,19 +1603,26 @@ function mensagemErro(e){
     blocked_by_policy: ["A sua organização bloqueou este conector.", "Fale com o administrador da conta Claude."],
     tool_error: ["O Windsor.ai respondeu com um erro.", (e && e.message) || ""],
     pendente: ["O Windsor ainda está montando o relatório.", "Tente atualizar em um minuto."],
+    sem_chave: ["Falta ligar o sistema ao Windsor.ai.", "A administradora precisa cadastrar a chave da API do Windsor no Supabase (segredo WINDSOR_API_KEY)."],
+    authentication_error: ["A chave da API do Windsor foi recusada.", "Confira o segredo WINDSOR_API_KEY no Supabase: ela pode ter sido trocada no Windsor."],
+    rate_limit_exceeded: ["O Windsor pediu uma pausa nas consultas.", "Tente atualizar em alguns minutos."],
+    mfa: ["Confirme a verificação em duas etapas.", "Saia e entre de novo no sistema."],
+    sessao: ["Sua sessão expirou.", "Saia e entre de novo no sistema."],
   }[c] || ["Não foi possível falar com o Windsor.ai agora.", "Tente atualizar daqui a pouco."];
   return {titulo: m[0], dica: m[1], permitir: c === "approval_required" || c === "consent_required" || c === "pendente" || (e && e.retryable)};
 }
 
 /* ---------- gráficos do BI ---------- */
-function graficoDiario(linhas, ini, fim){
+const CFG_IG = {v: {k: "views", nome: "visualizações", cor: "#007AFF"}, a: {k: "reach", nome: "contas alcançadas", cor: "#AF52DE"}};
+function graficoDiario(linhas, ini, fim, cfg = CFG_IG){
+  const fv = cfg.v.f || fmtK;
   const W = 960, H = 280, pb = 30, pt = 34, esq = 44;
   const dias = dif(ini, fim) + 1, bw = (W - esq) / dias;
   const mapa = Object.fromEntries(linhas.map(r => [chaveD(r.d), r]));
-  const serie = [...Array(dias)].map((_, k) => { const d = somar(ini, k), r = mapa[chaveD(d)] || {}; return {d, v: +r.views || 0, a: +r.reach || 0}; });
+  const serie = [...Array(dias)].map((_, k) => { const d = somar(ini, k), r = mapa[chaveD(d)] || {}; return {d, r, v: +r[cfg.v.k] || 0, a: cfg.a ? (+r[cfg.a.k] || 0) : 0}; });
   const mx = Math.max(10, ...serie.map(s => s.v)); const passo = Math.pow(10, Math.floor(Math.log10(mx))) * (mx / Math.pow(10, Math.floor(Math.log10(mx))) > 5 ? 2 : 1); const topo = Math.ceil(mx / passo) * passo;
   const y = v => H - pb - (v / topo) * (H - pb - pt), x = k => esq + k * bw + bw / 2;
-  const grades = [...Array(Math.round(topo / passo) + 1)].map((_, i) => i * passo).map(v => `<line class="grade-l" x1="${esq}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text class="eixo" x="${esq - 8}" y="${y(v) + 4}" text-anchor="end">${fmtK(v)}</text>`).join("");
+  const grades = [...Array(Math.round(topo / passo) + 1)].map((_, i) => i * passo).map(v => `<line class="grade-l" x1="${esq}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text class="eixo" x="${esq - 8}" y="${y(v) + 4}" text-anchor="end">${fv(v)}</text>`).join("");
   const linha = k => serie.map((s, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(s[k]).toFixed(1)).join(" ");
   const area = `${linha("v")} L${x(dias - 1)} ${H - pb} L${x(0)} ${H - pb}Z`;
   // faixas das campanhas e eventos do calendário
@@ -1580,30 +1633,34 @@ function graficoDiario(linhas, ini, fim){
     const cor = corCat(i.cat);
     return `<rect x="${x1}" y="${pt}" width="${Math.max(x2 - x1, 3)}" height="${H - pb - pt}" fill="${cor}" opacity=".07"/><rect x="${x1}" y="${4 + lin * 14}" width="${Math.max(x2 - x1, 3)}" height="3" rx="1.5" fill="${cor}"/><text x="${x1 + 2}" y="${15 + lin * 14}" class="eixo" style="fill:${cor};font-weight:600">${esc(i.nome.length > 28 ? i.nome.slice(0, 27) + "…" : i.nome)}</text>`; }).join("");
   const marcas = serie.map((s, k) => (k % Math.ceil(dias / 8) === 0) ? `<text class="eixo" x="${x(k)}" y="${H - 10}" text-anchor="middle">${fData(s.d)}</text>` : "").join("");
-  const alvos = serie.map((s, k) => `<rect x="${esq + k * bw}" y="${pt}" width="${bw}" height="${H - pb - pt}" fill="transparent"><title>${fSem(s.d)}: ${fmtN(s.v)} visualizações · ${fmtN(s.a)} contas alcançadas</title></rect>`).join("");
+  const alvos = serie.map((s, k) => `<rect x="${esq + k * bw}" y="${pt}" width="${bw}" height="${H - pb - pt}" fill="transparent"><title>${cfg.dica ? cfg.dica(s) : `${fSem(s.d)}: ${fmtN(s.v)} ${cfg.v.nome}${cfg.a ? ` · ${fmtN(s.a)} ${cfg.a.nome}` : ""}`}</title></rect>`).join("");
   const id = "gbi" + (++_gid);
-  return `<svg class="svg-g" viewBox="0 0 ${W} ${H}" role="img" aria-label="Visualizações e alcance por dia"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#007AFF" stop-opacity=".28"/><stop offset="1" stop-color="#007AFF" stop-opacity="0"/></linearGradient></defs>
-    ${grades}${faixas}<path class="area" d="${area}" fill="url(#${id})"/><path class="traco" pathLength="100" d="${linha("v")}" fill="none" stroke="#007AFF" stroke-width="2.4" stroke-linejoin="round"/><path class="traco" pathLength="100" d="${linha("a")}" fill="none" stroke="#AF52DE" stroke-width="2" stroke-dasharray="0" stroke-linejoin="round"/>${marcas}${alvos}</svg>`;
+  return `<svg class="svg-g" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(cfg.v.nome)} por dia"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${cfg.v.cor}" stop-opacity=".28"/><stop offset="1" stop-color="${cfg.v.cor}" stop-opacity="0"/></linearGradient></defs>
+    ${grades}${faixas}<path class="area" d="${area}" fill="url(#${id})"/><path class="traco" pathLength="100" d="${linha("v")}" fill="none" stroke="${cfg.v.cor}" stroke-width="2.4" stroke-linejoin="round"/>${cfg.a ? `<path class="traco" pathLength="100" d="${linha("a")}" fill="none" stroke="${cfg.a.cor}" stroke-width="2" stroke-linejoin="round"/>` : ""}${marcas}${alvos}</svg>`;
 }
 
 /* ---------- a aba ---------- */
 function vBI(){
   setTimeout(() => carregarBI(false), 0);
-  const n = BI.dias;
-  const fontes = `<div class="bi-fontes">${FONTES_BI.map(f => `<span class="bi-fonte ${f.ativo ? "on" : ""}" title="${f.ativo ? "Conectado no Windsor" : "Ainda não conectado no Windsor"}"><i></i>${f.nome}${f.ativo ? "" : " · conectar"}</span>`).join("")}</div>`;
-  const quando = BI.quando ? `atualizado ${new Date(BI.quando).toLocaleString("pt-BR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"})}` : "";
-  const topo = `<div class="filtros">
+  const n = BI.dias, s = st(BI.fonte), ocupado = s.estado === "carregando" || s.atualizando;
+  const pont = f => { const e = st(f.id).estado; return e === "pronto" ? "on" : e === "vazio" ? "off" : ""; };
+  const fontes = `<div class="segmentado bi-src" role="group" aria-label="Rede">${FONTES_BI.map(f => `<button data-bi-fonte="${f.id}" aria-pressed="${BI.fonte === f.id}"><i class="bi-pt ${pont(f)}"></i>${f.nome}</button>`).join("")}</div>`;
+  const quando = s.quando ? new Date(s.quando).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"}) : "";
+  const topo = `<div class="filtros">${fontes}
       <div class="segmentado" role="group" aria-label="Período">${[[7,"7 dias"],[30,"30 dias"],[90,"90 dias"]].map(([v, t]) => `<button data-bi-dias="${v}" aria-pressed="${n === v}">${t}</button>`).join("")}</div>
-      <button class="btn" data-bi-atualizar ${BI.estado === "carregando" || BI.estado === "gerando" ? "disabled" : ""}>${icone("i-atualizar", "p")}Atualizar</button>
-      <span class="peq sec">${BI.estado === "pronto" ? "Fonte: Windsor.ai · " + quando : ""}</span>
-      <span style="margin-left:auto">${fontes}</span></div>`;
+      <button class="btn" data-bi-atualizar ${ocupado ? "disabled" : ""}>${icone("i-atualizar", "p")}${s.atualizando ? "Atualizando…" : "Atualizar"}</button>
+      <span class="peq sec">${s.estado === "pronto" ? `Windsor.ai · dados de ${quando} · atualiza sozinho a cada 5 min${s.erroSilencioso ? " · última tentativa falhou" : ""}` : ""}</span></div>`;
+  const nomeF = FONTES_BI.find(f => f.id === BI.fonte).nome;
 
-  if(BI.estado === "sem-mcp") return `<div class="vista">${topo}<section class="cartao bi-vazio">${icone("i-bi")}<h2>O BI de redes funciona na versão publicada no Claude</h2><p class="sec">Os números vêm ao vivo do Windsor.ai pelo conector de quem está vendo. Abra o painel do Casapark no Claude, com o conector Windsor.ai ligado em Configurações → Conectores.</p></section></div>`;
-  if(BI.estado === "erro"){ const m = mensagemErro(BI.erro); return `<div class="vista">${topo}<section class="cartao bi-vazio">${icone("i-alerta")}<h2>${esc(m.titulo)}</h2><p class="sec">${esc(m.dica)}</p>${m.permitir ? `<button class="btn primario" data-bi-atualizar>Permitir acesso e carregar</button>` : ""}</section></div>`; }
-  if(BI.estado !== "pronto" || !BI.conta){
+  if(s.estado === "sem-mcp") return `<div class="vista">${topo}<section class="cartao bi-vazio">${icone("i-bi")}<h2>O BI de redes não está disponível aqui</h2><p class="sec">Abra o sistema do Casapark com login, ou o painel publicado no Claude com o conector Windsor.ai ligado.</p></section></div>`;
+  if(s.estado === "erro"){ const m = mensagemErro(s.erro); return `<div class="vista">${topo}<section class="cartao bi-vazio">${icone("i-alerta")}<h2>${esc(m.titulo)}</h2><p class="sec">${esc(m.dica)}</p>${m.permitir ? `<button class="btn primario" data-bi-atualizar>Tentar de novo</button>` : ""}</section></div>`; }
+  if(s.estado === "vazio") return `<div class="vista">${topo}<section class="cartao bi-vazio">${icone("i-bi")}<h2>${esc(nomeF)} ainda não está conectado</h2><p class="sec">Nenhum dado de ${esc(nomeF)} chegou do Windsor.ai neste período. Conecte a conta em windsor.ai (Conectores → ${esc(nomeF)}) com um perfil que tenha acesso a ela; os números aparecem aqui sozinhos em seguida.</p><button class="btn" data-bi-atualizar>Verificar de novo</button></section></div>`;
+  if(s.estado !== "pronto"){
     const esq = `<div class="bi-esq">${[1,2,3,4].map(() => `<div class="cartao c3 sk"><i></i><i></i><i></i></div>`).join("")}<div class="cartao c12 sk alto"><i></i></div></div>`;
-    return `<div class="vista">${topo}<p class="peq sec" style="margin:-8px 0 16px">${BI.estado === "gerando" ? "O Windsor está montando o relatório…" : "Buscando os dados no Windsor.ai…"}</p>${esq}</div>`;
+    return `<div class="vista">${topo}<p class="peq sec" style="margin:-8px 0 16px">Buscando os dados de ${esc(nomeF)} no Windsor.ai…</p>${esq}</div>`;
   }
+  if(BI.fonte === "google_ads" || BI.fonte === "facebook") return vAds(topo, s);
+  if(BI.fonte === "facebook_organic") return vPagina(topo, s);
 
   // períodos
   const fim = somar(HOJE, -1), ini = somar(fim, -(n - 1)), iniAnt = somar(ini, -n), fimAnt = somar(ini, -1);
@@ -1681,12 +1738,110 @@ function vBI(){
     </div>
     <section class="cartao c12"><div class="cab"><h2>Campanhas e eventos nas redes</h2><span class="peq sec">posts ligados aos itens do calendário</span></div>${cruzHtml}${alerta(aCruz)}</section>
   </div>
-  <p class="peq sec" style="margin:16px 0 0">Dados do Instagram @${esc((BI.seg && BI.seg.username) || "casapark")} via Windsor.ai. A Meta pode levar até 48 h para consolidar os números da conta; os dos posts chegam antes. Facebook, Meta Ads e TikTok entram aqui assim que forem conectados no Windsor.</p></div>`;
+  <p class="peq sec" style="margin:16px 0 0">Dados do Instagram @${esc((BI.seg && BI.seg.username) || "casapark")} via Windsor.ai. A Meta pode levar até 48 h para consolidar os números da conta; os dos posts chegam antes. As outras redes ficam nos botões do topo.</p></div>`;
+}
+
+/* ---------- Google Ads e Meta Ads ---------- */
+const CANAL = {SEARCH: "Pesquisa", DISPLAY: "Display", PERFORMANCE_MAX: "Performance Max", DEMAND_GEN: "Demand Gen", VIDEO: "YouTube", SHOPPING: "Shopping", MULTI_CHANNEL: "Várias redes", SMART: "Inteligente", LOCAL: "Local", DISCOVERY: "Discovery"};
+const DISP = {MOBILE: "Celular", DESKTOP: "Computador", TABLET: "Tablet", CONNECTED_TV: "TV", OTHER: "Outros", UNKNOWN: "Outros"};
+const SITU = {ENABLED: "Ativa", ACTIVE: "Ativa", PAUSED: "Pausada", REMOVED: "Removida", DELETED: "Removida", ARCHIVED: "Arquivada"};
+function deltaBI(v, n, menorMelhor){
+  if(v == null || !isFinite(v)) return `<span class="sec">sem comparação</span>`;
+  const bom = menorMelhor ? v <= 0 : v >= 0;
+  return `<span class="bi-delta ${bom ? "sobe" : "desce"}">${v >= 0 ? "▲" : "▼"} ${fmtP(Math.abs(v), 0)}</span> <span class="sec">vs. ${n} dias antes</span>`;
+}
+const varBI = (a, b) => (b ? (a - b) / b : null);
+function kpiCard(k){
+  return `<section class="cartao kpi c3" style="--c:${k.cor}"><div class="kpi-cab"><span class="kpi-ico">${icone(k.ic, "p")}</span><span class="rotulo">${esc(k.l)}</span></div><div class="num">${k.v}</div><div class="peq">${k.s || ""}</div>${k.vals && k.vals.length > 1 ? spark(k.vals, k.cor) : ""}</section>`;
+}
+function vAds(topo, s){
+  const google = BI.fonte === "google_ads", n = BI.dias, cor = google ? "#007AFF" : "#5856D6";
+  const fim = HOJE, ini = somar(fim, -(n - 1)), iniAnt = somar(ini, -n), fimAnt = somar(ini, -1);
+  const no = (r, a, b) => r.d >= a && r.d <= b;
+  const atual = s.linhas.filter(r => no(r, ini, fim)), ant = s.linhas.filter(r => no(r, iniAnt, fimAnt));
+  const tot = l => l.reduce((t, r) => { t.imp += +r.impressions || 0; t.cli += +r.clicks || 0; t.inv += +r.spend || 0; t.conv += +r.conversions || 0; return t; }, {imp: 0, cli: 0, inv: 0, conv: 0});
+  const A = tot(atual), B = tot(ant);
+  const porDia = {};
+  atual.forEach(r => { const o = porDia[chaveD(r.d)] ||= {d: r.d, spend: 0, clicks: 0, impressions: 0, conversions: 0}; o.spend += +r.spend || 0; o.clicks += +r.clicks || 0; o.impressions += +r.impressions || 0; o.conversions += +r.conversions || 0; });
+  const dias = Object.values(porDia).sort((a, b) => a.d - b.d), serie = k => dias.map(o => o[k]);
+  const ctr = t => t.imp ? t.cli / t.imp : null, cpc = t => t.cli ? t.inv / t.cli : null, cpm = t => t.imp ? t.inv / t.imp * 1000 : null;
+
+  const kpis = [
+    {l: "Investimento", v: fmtRk(A.inv), s: deltaBI(varBI(A.inv, B.inv), n), cor: cor, ic: "i-painel", vals: serie("spend")},
+    {l: "Cliques", v: fmtK(A.cli), s: `${deltaBI(varBI(A.cli, B.cli), n)}<br><span class="sec">${fmtK(A.imp)} impressões</span>`, cor: "#AF52DE", ic: "i-alcance", vals: serie("clicks")},
+    {l: "CTR", v: fmtP(ctr(A), 2), s: `${deltaBI(varBI(ctr(A), ctr(B)), n)}<br><span class="sec">CPC médio ${fmtR(cpc(A))}</span>`, cor: "#30B0C7", ic: "i-olho"},
+    google
+      ? {l: "Conversões", v: fmtN(A.conv), s: A.conv ? `<span class="sec">${fmtR(A.inv / A.conv)} por conversão · taxa ${fmtP(A.cli ? A.conv / A.cli : null, 2)}</span>` : `<span class="sec">nenhuma registrada no período</span>`, cor: "#34C759", ic: "i-check", vals: serie("conversions")}
+      : {l: "CPM", v: fmtR(cpm(A)), s: `${deltaBI(varBI(cpm(A), cpm(B)), n, true)}<br><span class="sec">custo por mil impressões</span>`, cor: "#FF9500", ic: "i-coracao"},
+  ].map(kpiCard).join("");
+
+  // campanhas
+  const camp = {};
+  atual.forEach(r => { const c = camp[r.campaign || "(sem nome)"] ||= {nome: r.campaign || "(sem nome)", tipo: r.advertising_channel_type, situ: r.campaign_status, imp: 0, cli: 0, inv: 0, conv: 0}; c.imp += +r.impressions || 0; c.cli += +r.clicks || 0; c.inv += +r.spend || 0; c.conv += +r.conversions || 0; if(r.campaign_status) c.situ = r.campaign_status; });
+  const camps = Object.values(camp).filter(c => c.imp || c.inv).sort((a, b) => b.inv - a.inv);
+  const mxInv = Math.max(.01, ...camps.map(c => c.inv));
+  const linhasC = camps.map(c => `<tr><td style="min-width:210px"><b>${esc(c.nome)}</b><div class="peq sec">${[google && c.tipo ? (CANAL[c.tipo] || c.tipo) : "", c.situ ? (SITU[c.situ] || c.situ) : ""].filter(Boolean).join(" · ")}</div></td>
+      <td class="tab">${fmtN(c.imp)}</td><td class="tab">${fmtN(c.cli)}</td><td class="tab">${fmtP(ctr(c), 2)}</td>
+      <td style="min-width:130px"><div class="progresso"><div class="barra"><i style="width:${100 * c.inv / mxInv}%;background:${cor}"></i></div><span class="tab peq">${fmtR(c.inv)}</span></div></td>
+      <td class="tab">${fmtR(cpc(c))}</td>${google ? `<td class="tab">${fmtN(c.conv)}${c.conv ? `<div class="peq sec">${fmtR(c.inv / c.conv)} cada</div>` : ""}</td>` : `<td class="tab">${fmtR(cpm(c))}</td>`}</tr>`).join("");
+  const tabela = camps.length ? `<div class="rolar"><table><thead><tr><th>Campanha</th><th>Impressões</th><th>Cliques</th><th>CTR</th><th>Investimento</th><th>CPC</th><th>${google ? "Conversões" : "CPM"}</th></tr></thead><tbody>${linhasC}</tbody></table></div>` : `<p class="vazio">Nenhuma campanha com veiculação no período.</p>`;
+
+  // dispositivos (Google Ads)
+  let dispHtml = "";
+  if(google && s.seg && s.seg.length){
+    const ag = {}; s.seg.forEach(r => { const k = DISP[r.device] || r.device || "Outros"; const o = ag[k] ||= {k, cli: 0, inv: 0}; o.cli += +r.clicks || 0; o.inv += +r.spend || 0; });
+    const l = Object.values(ag).sort((a, b) => b.cli - a.cli), tc = Math.max(1, l.reduce((t, o) => t + o.cli, 0)), ti = Math.max(.01, l.reduce((t, o) => t + o.inv, 0));
+    dispHtml = `<section class="cartao c4"><div class="cab"><h2>Por dispositivo</h2><span class="peq sec">cliques · investimento</span></div><ul class="carga bi-fmts">${l.map(o => `<li><span class="bi-fmt" style="--c:${cor}">${esc(o.k)}</span><span><span class="cbar" style="margin:0 0 6px"><i style="width:${100 * o.cli / tc}%;background:${cor}"></i></span><small class="peq sec">${fmtR(o.inv)} · ${fmtP(o.inv / ti, 0)} do investimento</small></span><b class="n">${fmtP(o.cli / tc, 0)}</b></li>`).join("")}</ul>${alerta(l[0] ? `${l[0].k} traz ${fmtP(l[0].cli / tc, 0)} dos cliques.` : "")}</section>`;
+  }
+
+  // leituras
+  const topo1 = camps[0];
+  const aCamp = topo1 ? `${esc(topo1.nome)} concentra ${fmtP(topo1.inv / Math.max(A.inv, .01), 0)} do investimento do período${camps.length > 1 ? `; a de menor CPC é ${esc([...camps].filter(c => c.cli).sort((a, b) => cpc(a) - cpc(b))[0].nome)} (${fmtR(cpc([...camps].filter(c => c.cli).sort((a, b) => cpc(a) - cpc(b))[0]))} por clique)` : ""}.` : "";
+  const aConv = google && A.inv > 0 && A.conv < 5 ? "Quase nenhuma conversão registrada. Isso costuma indicar que as conversões (clique em “Como chegar”, WhatsApp, ligação, formulário) não estão configuradas no Google Ads, e não que as campanhas vão mal." : "";
+  const pico = [...dias].sort((a, b) => b.clicks - a.clicks)[0];
+  const aGraf = pico ? `Dia com mais cliques: ${fSem(pico.d)} (${fmtN(pico.clicks)} cliques, ${fmtR(pico.spend)} investidos). As faixas no topo são campanhas e eventos do calendário.` : "";
+  const cfg = {v: {k: "spend", nome: "investido", cor, f: v => "R$ " + fmtK(v)}, a: null, dica: x => `${fSem(x.d)}: ${fmtR(x.v)} investidos · ${fmtN(x.r.clicks)} cliques · ${fmtN(x.r.impressions)} impressões${google ? ` · ${fmtN(x.r.conversions)} conversões` : ""}`};
+
+  return `<div class="vista">${topo}<div class="grade">${kpis}
+    <section class="cartao c12"><div class="cab"><h2>Investimento por dia</h2><div class="legenda-g"><span><i style="background:${cor}"></i>Investimento (passe o mouse para ver cliques)</span></div></div>${graficoDiario(dias, ini, fim, cfg)}${alerta(aGraf)}</section>
+    <section class="cartao ${dispHtml ? "c8" : "c12"}"><div class="cab"><h2>Campanhas</h2><span class="peq sec">${plural(camps.length, "campanha")} com veiculação</span></div>${tabela}${alerta([aCamp, aConv].filter(Boolean).join(" "))}</section>
+    ${dispHtml}
+  </div>
+  <p class="peq sec" style="margin:16px 0 0">Dados de ${google ? "Google Ads" : "Meta Ads (Facebook e Instagram)"} via Windsor.ai, incluindo hoje. As plataformas consolidam os números com algumas horas de atraso, e o Windsor renova os últimos dias conforme o plano contratado.</p></div>`;
+}
+
+/* ---------- Página do Facebook ---------- */
+function vPagina(topo, s){
+  const n = BI.dias, cor = "#1877F2";
+  const fim = somar(HOJE, -1), ini = somar(fim, -(n - 1)), iniAnt = somar(ini, -n), fimAnt = somar(ini, -1);
+  const no = (r, a, b) => r.d >= a && r.d <= b;
+  const atual = s.conta.filter(r => no(r, ini, fim)), ant = s.conta.filter(r => no(r, iniAnt, fimAnt));
+  const soma = (l, k) => l.reduce((t, r) => t + (+r[k] || 0), 0), serie = k => atual.map(r => +r[k] || 0);
+  const ult = [...s.conta].reverse().find(r => r.page_follows != null && r.page_follows !== "");
+  const kpis = [
+    {l: "Seguidores", v: ult ? fmtK(+ult.page_follows) : "—", s: soma(atual, "page_daily_follows") ? `<span class="bi-delta sobe">+${fmtN(soma(atual, "page_daily_follows"))}</span> <span class="sec">novos no período</span>` : "", cor, ic: "i-pessoas", vals: serie("page_daily_follows")},
+    {l: "Impressões", v: fmtK(soma(atual, "page_impressions")), s: deltaBI(varBI(soma(atual, "page_impressions"), soma(ant, "page_impressions")), n), cor: "#AF52DE", ic: "i-olho", vals: serie("page_impressions")},
+    {l: "Engajamentos", v: fmtK(soma(atual, "page_post_engagements")), s: deltaBI(varBI(soma(atual, "page_post_engagements"), soma(ant, "page_post_engagements")), n), cor: "#FF9500", ic: "i-coracao", vals: serie("page_post_engagements")},
+    {l: "Visitas à página", v: fmtK(soma(atual, "page_views_total")), s: deltaBI(varBI(soma(atual, "page_views_total"), soma(ant, "page_views_total")), n), cor: "#30B0C7", ic: "i-alcance", vals: serie("page_views_total")},
+  ].map(kpiCard).join("");
+  const posts = (s.posts || []).filter(p => p.t >= ini && p.t <= somar(fim, 1));
+  const eng = p => (+p.post_reactions_no_shares || 0) + (+p.post_comments_total || 0) + (+p.post_activity_by_action_type_share || 0);
+  const linhasP = [...posts].sort((a, b) => eng(b) - eng(a)).slice(0, 12).map((p, k) => `<tr><td class="tab sec">${k + 1}</td><td><div class="bi-leg">${esc((p.post_message || "(sem texto)").replace(/\s+/g, " ").slice(0, 110))}${(p.post_message || "").length > 110 ? "…" : ""}</div><div class="peq sec">${fSem(p.t)}${p.permalink_url ? ` · <a class="link-item" href="${esc(p.permalink_url)}" target="_blank" rel="noopener">abrir post</a>` : ""}</div></td>
+    <td class="tab">${fmtN(p.post_impressions)}</td><td class="tab">${fmtN(p.post_reactions_no_shares)}</td><td class="tab">${fmtN(p.post_comments_total)}</td><td class="tab">${fmtN(p.post_activity_by_action_type_share)}</td><td class="tab">${fmtN(p.post_clicks)}</td></tr>`).join("");
+  const pico = [...atual].sort((a, b) => (+b.page_impressions || 0) - (+a.page_impressions || 0))[0];
+  const cfg = {v: {k: "page_impressions", nome: "impressões", cor}, a: {k: "page_post_engagements", nome: "engajamentos", cor: "#FF9500"}};
+  return `<div class="vista">${topo}<div class="grade">${kpis}
+    <section class="cartao c12"><div class="cab"><h2>Impressões e engajamentos por dia</h2><div class="legenda-g"><span><i style="background:${cor}"></i>Impressões</span><span><i style="background:#FF9500"></i>Engajamentos</span></div></div>${graficoDiario(atual, ini, fim, cfg)}${alerta(pico ? `Pico do período: ${fSem(pico.d)}, com ${fmtN(pico.page_impressions)} impressões.` : "")}</section>
+    <section class="cartao c12"><div class="cab"><h2>Posts do período</h2><span class="peq sec">ordenados por reações + comentários + compartilhamentos</span></div>
+      ${posts.length ? `<div class="rolar"><table><thead><tr><th>#</th><th>Post</th><th>Impressões</th><th>Reações</th><th>Coment.</th><th>Compart.</th><th>Cliques</th></tr></thead><tbody>${linhasP}</tbody></table></div>` : `<p class="vazio">Nenhum post da página no período.</p>`}</section>
+  </div>
+  <p class="peq sec" style="margin:16px 0 0">Dados da página do Facebook via Windsor.ai. A Meta pode levar até 48 h para consolidar os números da página.</p></div>`;
 }
 
 document.addEventListener("click", ev => {
-  const b = ev.target.closest("[data-bi-dias],[data-bi-atualizar],[data-bi-ord]"); if(!b) return;
-  if(b.dataset.biDias){ BI.dias = +b.dataset.biDias; LS.set("bi-dias", BI.dias); BI.estado = "ocioso"; render(); }
+  const b = ev.target.closest("[data-bi-dias],[data-bi-atualizar],[data-bi-ord],[data-bi-fonte]"); if(!b) return;
+  if(b.dataset.biFonte){ BI.fonte = b.dataset.biFonte; LS.set("bi-fonte", BI.fonte); render(); }
+  else if(b.dataset.biDias){ BI.dias = +b.dataset.biDias; LS.set("bi-dias", BI.dias); render(); }
   else if(b.dataset.biAtualizar !== undefined){ carregarBI(true); }
   else if(b.dataset.biOrd){ BI.ord = b.dataset.biOrd; render(); }
 });

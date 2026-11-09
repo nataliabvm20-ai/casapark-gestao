@@ -21,6 +21,19 @@
   // tipo de link que trouxe a pessoa até aqui (convite ou recuperação de senha) — lido antes do Supabase consumir o endereço
   const tipoLink = (new URLSearchParams(location.hash.slice(1)).get("type")) || (new URLSearchParams(location.search).get("type")) || "";
   const sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, {auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: "implicit"}});
+
+  // BI de redes: os números do Windsor.ai vêm da função segura "redes-bi" (a chave da API fica no servidor)
+  window.__WINDSOR__ = async input => {
+    const r = await sb.functions.invoke("redes-bi", {body: input});
+    if(r.error){
+      let e = {code: "upstream_error", message: "O servidor não respondeu."};
+      try { const j = await r.error.context.json(); if(j && j.erro) e = j.erro; } catch(_){}
+      throw e;
+    }
+    const d = r.data || {};
+    if(d.erro) throw d.erro;
+    return {linhas: Array.isArray(d.data) ? d.data : [], storedAt: d.em || Date.now()};
+  };
   window.__SB__ = sb;
 
   /* ---------- telas do portão ---------- */
