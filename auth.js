@@ -143,7 +143,7 @@
     const {data: perfil} = await sb.from("perfis").select("user_id, empresa_id, nome, email, papel, ativo").eq("user_id", session.user.id).maybeSingle();
     if(!perfil || !perfil.ativo){ await sb.auth.signOut(); return tela("Acesso não liberado", `<p class="sec">Sua conta existe, mas não está ativa nesta empresa. Fale com um administrador.</p><button class="btn" id="voltar">Voltar</button>`), $p("#voltar").onclick = telaLogin; }
     window.PERFIL = perfil;
-    sb.rpc("registrar_acesso");
+    sb.rpc("registrar_acesso").then(() => {}, () => {});
     try { await carregarDados(perfil); } catch(e){ return tela("Erro ao carregar", `<p class="sec">${escP(e.message || "Tente recarregar a página.")}</p>`); }
     iniciado = true;
     await carregarScript("app.js"); await carregarScript("admin.js");
@@ -181,10 +181,54 @@
     D.arquivos = Object.fromEntries(arqs.filter(a => a.nome.endsWith(".csv")).map(a => [a.nome, a.conteudo]));
     const ult = arqs.reduce((m, a) => a.atualizado_em > m ? a.atualizado_em : m, "");
     D.gerado_em = ult ? new Date(ult).toLocaleString("pt-BR", {day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit"}) : "";
+    await juntarAgendaGoogle(D);
     window.__DADOS__ = D;
     assinatura = arqs.map(a => a.nome + a.versao).sort().join("|");
     await carregarAjustes();
   }
+  /* ---------- Google Agenda → calendário do sistema ---------- */
+  const CAT_AGENDA = {"Casapark Prime": "Casapark Prime", "Espaço Casa": "Espaço Casa / Arquitetos"};
+  const PALAVRAS_FRACAS = new Set(["casapark","evento","eventos","talk","visita","reuniao","semana","casa","prime","campanha","exposicao","feira"]);
+  const semAcento = t => String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const palavras = t => semAcento(t).split(/[^a-z0-9]+/).filter(w => w.length >= 4 && !PALAVRAS_FRACAS.has(w));
+  function linhasCSV(txt){
+    const L = []; let campo = "", linha = [], q = false; txt = String(txt || "").replace(/^﻿/, "");
+    for(let i = 0; i < txt.length; i++){ const c = txt[i];
+      if(q){ if(c === '"'){ if(txt[i+1] === '"'){ campo += '"'; i++; } else q = false; } else campo += c; }
+      else if(c === '"') q = true; else if(c === ";"){ linha.push(campo); campo = ""; }
+      else if(c === "\n" || c === "\r"){ if(c === "\r" && txt[i+1] === "\n") i++; linha.push(campo); campo = ""; L.push(linha); linha = []; }
+      else campo += c; }
+    if(campo || linha.length){ linha.push(campo); L.push(linha); }
+    return L.filter(l => l.some(x => x !== ""));
+  }
+  const dataBR = iso => iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4);
+  const isoDeBR = br => { const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(br || ""); return m ? `${m[3]}-${m[2]}-${m[1]}` : (br || "").slice(0, 10); };
+  const campoCSV = v => { v = String(v ?? ""); return /[;"\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  window.AGENDA_GOOGLE = {estado: "não configurada", avisos: [], total: 0, iguais: 0};
+  async function juntarAgendaGoogle(D){
+    let r;
+    try { r = await sb.functions.invoke("agenda-google", {body: {}}); } catch(e){ r = {error: e}; }
+    if(r.error || !r.data){ window.AGENDA_GOOGLE = {estado: "indisponível", avisos: [], total: 0, iguais: 0}; return; }
+    const {eventos = [], avisos = [], configuradas = []} = r.data;
+    if(!configuradas.length){ window.AGENDA_GOOGLE = {estado: "não configurada", avisos, total: 0, iguais: 0}; return; }
+    // itens que já estão no calendário do sistema: não duplicar
+    const existentes = [];
+    Object.entries(D.arquivos).filter(([n]) => /^calendario_casapark_\d{4}\.csv$/.test(n)).forEach(([, txt]) => {
+      const L = linhasCSV(txt); const cab = L[0] || []; const iI = cab.indexOf("Início"), iF = cab.indexOf("Fim"), iN = cab.indexOf("Item");
+      L.slice(1).forEach(l => existentes.push({ini: isoDeBR(l[iI]), fim: isoDeBR(l[iF] || l[iI]), w: palavras(l[iN])}));
+    });
+    const repetido = ev => { const w = palavras(ev.titulo); if(!w.length) return false;
+      return existentes.some(x => x.ini <= ev.fim && x.fim >= ev.inicio && x.w.some(p => w.includes(p))); };
+    const cab = ["ID","Início","Fim","Hora","Item","Categoria","Formato","Campanha","Recorrência","Regra de data","Referência ano anterior","Status da data","Responsável","Fornecedor","Lojas participantes","Agenda","Observações"];
+    let iguais = 0; const linhas = [];
+    eventos.forEach((ev, k) => {
+      if(repetido(ev)){ iguais++; return; }
+      linhas.push(["G-" + (k + 1), dataBR(ev.inicio), dataBR(ev.fim), ev.hora || "", ev.titulo, CAT_AGENDA[ev.agenda] || "Agenda externa", "Agenda", "", "pontual", "", "", "confirmada", "", "", "", "Google · " + ev.agenda, ev.local || ""].map(campoCSV).join(";"));
+    });
+    D.arquivos["calendario_google.csv"] = [cab.join(";"), ...linhas].join("\r\n");
+    window.AGENDA_GOOGLE = {estado: "conectada", avisos, total: linhas.length, iguais, agendas: configuradas};
+  }
+
   async function carregarAjustes(){
     const {data, error} = await sb.from("ajustes").select("tipo, item_id, valor");
     if(error) throw error;

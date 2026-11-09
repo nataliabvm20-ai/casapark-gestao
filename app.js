@@ -141,7 +141,7 @@ function fasePorRegra(regra){
 
 function montar(arquivos, fonte){
   const itens = [], porId = {};
-  const nomesCal = Object.keys(arquivos).filter(n => /^calendario_casapark_\d{4}\.csv$/.test(n)).sort();
+  const nomesCal = Object.keys(arquivos).filter(n => /^calendario_(casapark_\d{4}|google)\.csv$/.test(n)).sort();
   let semId = 0;
   for(const n of nomesCal){
     for(const r of lerCSV(arquivos[n])){
