@@ -4,5 +4,5 @@
 window.CASAPARK_CONFIG = {
   supabaseUrl: "https://hokcwlfjjvfykfyuktwq.supabase.co",
   supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhva2N3bGZqanZmeWtmeXVrdHdxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM4MDAzNDIsImV4cCI6MjEwOTM3NjM0Mn0.ELcpiq5gg8VoUz64ISQBMPZvbphE9TsHNdDMhXdQpqE",
-  versao: "5",
+  versao: "6",
 };

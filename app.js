@@ -115,7 +115,7 @@ let M = null;          // modelo montado
 const S = {            // estado da interface
   aba: new URLSearchParams(location.search).get("aba") || LS.get("aba", "geral"),
   pessoa: LS.get("pessoa", "todos"),
-  cal: {ano: null, visao: new URLSearchParams(location.search).get("visao") || "anual", mes: null, cats: new Set(Object.keys(CATS)), tipo: "todos"},
+  cal: {ano: null, visao: new URLSearchParams(location.search).get("visao") || "mensal", mes: null, cats: new Set(Object.keys(CATS)), tipo: "todos"},
   ev: {filtro: "proximos", rec: "todos", sel: null},
   camp: {ano: null},
   redes: {ano: null, mes: null},
@@ -236,7 +236,7 @@ function montar(arquivos, fonte){
   const anoPadrao = M.anos.includes(HOJE.getFullYear() + 1) && HOJE.getMonth() >= 9 ? HOJE.getFullYear() + 1 : HOJE.getFullYear();
   const pMes = /^(\d{4})-(\d{2})$/.exec(params.get("mes") || "");
   if(pMes && S.cal.ano === null){ S.cal.ano = +pMes[1]; S.cal.mes = +pMes[2] - 1; }
-  S.cal.ano ??= M.anos.includes(2027) ? 2027 : anoPadrao;
+  S.cal.ano ??= HOJE.getFullYear();   // abre sempre no mês de hoje
   S.cal.mes ??= HOJE.getMonth();
   S.camp.ano ??= anoPadrao;
   S.redes.ano ??= HOJE.getFullYear(); S.redes.mes ??= HOJE.getMonth();
