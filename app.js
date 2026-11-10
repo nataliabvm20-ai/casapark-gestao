@@ -181,6 +181,8 @@ function montar(arquivos, fonte){
     t.statusBase = t.status;
     if(ovr[t.idt]) t.status = ovr[t.idt];
     if(it && it.statusData === "cancelada" && t.status !== "concluída") t.status = "cancelada";
+    // tarefas vencidas e não concluídas da planilha antiga foram arquivadas no módulo de Demandas
+    if(window.__COMPARTILHADO__ && t.prazo && t.prazo < HOJE && t.status !== "concluída") return null;
     tarefas.push(t); if(it) it.tarefas.push(t);
     return t;
   };
@@ -201,13 +203,13 @@ function montar(arquivos, fonte){
       const t = novaTarefa({id_tarefa: it.id + "-" + cod, id_item: it.id, tipo_tarefa: tipo, area, etapa,
         tarefa: tarefa || it.nome, prazo_regra: regra, fornecedor: forn || it.forn, status_tarefa: "a fazer",
         origem: "modelo padrão (gerado no painel)"}, it);
-      t.virtual = true;
+      if(t) t.virtual = true;
     }
   }
   // demandas fora do radar registradas neste navegador
   for(const d of LS.get("demandas", [])){
     if(tarefas.some(t => t.idt === d.id_tarefa)) continue;
-    novaTarefa(d, null).local = true;
+    { const t = novaTarefa(d, null); if(t) t.local = true; }
   }
   // responsáveis editados no painel: por item (vale para todas as tarefas dele) e por demanda
   const respItem = LS.get("resp", {}), respTar = LS.get("respT", {});

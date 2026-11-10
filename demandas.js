@@ -322,6 +322,159 @@ function exportarCSV(){
   a.download = "demandas_casapark_" + chaveD(HOJE) + ".csv"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
+/* ---------- ligações com Hoje e Calendário ---------- */
+// Hoje: "minhas demandas" no topo (atrasadas, hoje e próximos 7 dias)
+const vGeralOrig = VISTAS.geral;
+VISTAS.geral = function(){
+  const html = vGeralOrig();
+  if(!DM.ok) return html;
+  const eu = window.PERFIL && window.PERFIL.nome, lim = somar(HOJE, 7);
+  const minhas = DM.lista.filter(d => d.situacao === "ativa" && d.etapa !== "feito" && (!eu || d.responsavel === eu))
+    .filter(d => !d.prazo || dataD(d.prazo) <= lim).sort((a, b) => (a.prazo || "9").localeCompare(b.prazo || "9"));
+  const semResp = DM.lista.filter(d => d.situacao === "ativa" && d.etapa !== "feito" && !d.responsavel && d.prazo && dataD(d.prazo) <= lim).length;
+  const bloco = `<section class="cartao" style="margin-bottom:24px"><div class="cab"><h2>${eu ? "Minhas demandas" : "Demandas"} · próximos 7 dias</h2>
+      <div class="linha">${podeEditar() ? `<button class="btn" data-dm-nova>${icone("i-mais", "p")}Nova demanda</button>` : ""}<button class="btn" data-aba="demandas">Abrir Demandas</button></div></div>
+    ${minhas.length ? minhas.slice(0, 12).map(linha).join("") + (minhas.length > 12 ? `<p class="peq sec">e mais ${minhas.length - 12} em Demandas.</p>` : "") : `<p class="vazio">Nada com prazo nos próximos 7 dias${eu ? " para " + esc(eu) : ""}.</p>`}
+    ${semResp ? `<p class="peq sec" style="margin:8px 0 0">${plural(semResp, "demanda", "demandas")} da equipe sem responsável vence${semResp === 1 ? "" : "m"} nesta semana. <button class="link-item" data-aba="demandas">Ver no quadro</button></p>` : ""}</section>`;
+  const i = html.indexOf('<div class="vista">');
+  return i >= 0 ? html.slice(0, i + 19) + bloco + html.slice(i + 19) : bloco + html;
+};
+
+// Calendário: ao abrir um evento, mostra as demandas ligadas e o atalho para criar uma
+const TIPO_POR_FORMATO = {Evento: "Evento / ativação", Feira: "Evento / ativação", Talk: "Evento / ativação", Montagem: "Evento / ativação", Mercado: "Evento / ativação", Briefing: "Comunicação direta"};
+const abrirItemOrig = abrirItem;
+abrirItem = function(id){
+  abrirItemOrig(id);
+  const it = M.porId[id], corpo = $("#dlg-corpo");
+  if(!it || !corpo || !$("#dlg").open || !DM.ok) return;
+  const lig = DM.lista.filter(d => d.item_calendario === id);
+  const sec = document.createElement("section");
+  sec.style.cssText = "margin-top:24px;padding-top:16px;border-top:1px solid var(--suave)";
+  sec.innerHTML = `<div class="cab" style="margin-bottom:8px"><h2 class="h2" style="font-size:18px">Demandas deste item</h2>${podeEditar() ? `<button class="btn" data-dm-do-item="${esc(id)}">${icone("i-mais", "p")}Criar demanda para este item</button>` : ""}</div>
+    ${lig.length ? lig.map(linha).join("") : `<p class="peq sec">Nenhuma demanda ligada ainda.</p>`}`;
+  corpo.appendChild(sec);
+};
+document.addEventListener("click", ev => {
+  const b = ev.target.closest("[data-dm-do-item]"); if(!b) return;
+  const it = M.porId[b.dataset.dmDoItem]; if(!it) return;
+  abrirFicha(null, {titulo: it.nome, categoria: CATEG.includes(it.cat) ? it.cat : "Rotina", tipo_entrega: TIPO_POR_FORMATO[it.formato] || "Outro",
+    item_calendario: it.id, prazo: chaveD(it.ini), inicio: isoD(HOJE) <= chaveD(it.ini) ? isoD(HOJE) : chaveD(it.ini), origem: "calendario"});
+});
+
+/* =====================================================================
+   PAUTA DAS REDES · planejamento da Jabot + produção interna
+   ===================================================================== */
+const REDES = {Instagram: "#E1306C", Facebook: "#1877F2", TikTok: "#25A3B5", LinkedIn: "#0A66C2", "E-mail": "#8E8E93", WhatsApp: "#25D366", YouTube: "#FF3B30", Outra: "#636366"};
+const FORMATOS = ["Feed", "Carrossel", "Reels", "Story", "E-mail", "Vídeo", "Artigo", "Outro"];
+const SIT_P = {ajuste: ["Ajuste", "#FF9500"], aprovado: ["Aprovado", "#007AFF"], postado: ["Postado", "#34C759"], cancelado: ["Cancelado", "#8E8E93"]};
+const PT = {lista: [], ok: false, mes: HOJE.getMonth(), ano: HOJE.getFullYear(), visao: LS.get("pt-visao", "mes"), rede: "", origem: "", editando: null};
+async function carregarPauta(){
+  const r = await sb.from("pauta_redes").select("*").order("data", {ascending: true});
+  if(!r.error){ PT.lista = r.data || []; PT.ok = true; }
+}
+carregarPauta().then(() => { if(S.aba === "redes" && !$("#dlg").open) render(); });
+sb.channel("pauta-equipe").on("postgres_changes", {event: "*", schema: "public", table: "pauta_redes"}, ev => {
+  if(ev.eventType === "DELETE") PT.lista = PT.lista.filter(x => x.id !== ev.old.id);
+  else { const i = PT.lista.findIndex(x => x.id === ev.new.id); if(i >= 0) PT.lista[i] = ev.new; else PT.lista.push(ev.new); }
+  if(S.aba === "redes" && !$("#dlg").open) render();
+}).subscribe();
+
+const etq = p => `<span class="dchip" style="--c:${REDES[p.rede] || "#636366"}">${esc(p.origem)} · ${esc(p.rede)}</span>`;
+const sitP = p => `<span class="dchip" style="--c:${(SIT_P[p.situacao] || SIT_P.ajuste)[1]}">${(SIT_P[p.situacao] || SIT_P.ajuste)[0]}</span>`;
+const nomeP = p => p.titulo || (p.legenda || "").replace(/\s+/g, " ").slice(0, 60) || p.formato;
+function filtrarP(l){ return l.filter(p => (!PT.rede || p.rede === PT.rede) && (!PT.origem || p.origem === PT.origem)); }
+
+function vPauta(){
+  const mesNome = MESES_N[PT.mes][0].toUpperCase() + MESES_N[PT.mes].slice(1);
+  const ini = new Date(PT.ano, PT.mes, 1), fim = new Date(PT.ano, PT.mes + 1, 0);
+  const doMes = filtrarP(PT.lista.filter(p => { const d = dataD(p.data); return d >= ini && d <= fim; }));
+  const topo = `<div class="filtros">
+    <div class="segmentado" role="group" aria-label="Visão"><button data-pt-visao="mes" aria-pressed="${PT.visao === "mes"}">Mês</button><button data-pt-visao="lista" aria-pressed="${PT.visao === "lista"}">Lista</button></div>
+    <div class="linha"><button class="btn" data-pt-mes="-1" aria-label="Mês anterior">${icone("i-esq", "p")}</button><span class="h2" style="min-width:190px;text-align:center;font-size:18px">${mesNome} de ${PT.ano}</span><button class="btn" data-pt-mes="1" aria-label="Próximo mês">${icone("i-dir", "p")}</button></div>
+    <select id="pt-rede" aria-label="Rede"><option value="">Todas as redes</option>${Object.keys(REDES).map(r => `<option ${PT.rede === r ? "selected" : ""}>${r}</option>`).join("")}</select>
+    <select id="pt-origem" aria-label="Origem"><option value="">Jabot e interna</option>${["Jabot", "Interna"].map(r => `<option ${PT.origem === r ? "selected" : ""}>${r}</option>`).join("")}</select>
+    ${podeEditar() ? `<button class="btn primario" data-pt-novo style="margin-left:auto">${icone("i-mais", "p")}Conteúdo interno</button>` : ""}</div>`;
+  if(!PT.ok) return `<div class="vista">${topo}<p class="sec">Carregando a pauta…</p></div>`;
+  const conta = k => doMes.filter(p => p.situacao === k).length;
+  const resumo = `<div class="kresumo"><div><span class="rotulo">No mês</span><b>${doMes.length}</b></div><div><span class="rotulo">Jabot</span><b>${doMes.filter(p => p.origem === "Jabot").length}</b></div><div><span class="rotulo">Internas</span><b>${doMes.filter(p => p.origem === "Interna").length}</b></div><div><span class="rotulo">Em ajuste</span><b>${conta("ajuste")}</b></div><div><span class="rotulo">Postados</span><b class="ok">${conta("postado")}</b></div></div>`;
+  let corpo;
+  if(PT.visao === "lista"){
+    corpo = doMes.length ? doMes.sort((a, b) => a.data.localeCompare(b.data)).map(p => `<button class="dlin" data-pt="${p.id}" style="--c:${REDES[p.rede] || "#636366"}"><i></i><span><b>${esc(nomeP(p))}</b><br><span class="peq sec">${etq(p)} ${esc(p.formato)}${p.responsavel ? " · " + esc(p.responsavel) : ""}</span></span><span class="so-larga peq sec">${fSem(dataD(p.data))}</span><span class="so-larga">${sitP(p)}</span>${avatar(p.responsavel)}</button>`).join("") : `<p class="vazio">Nenhum conteúdo neste mês.</p>`;
+  } else {
+    const primeiro = inicioSemana(ini), dias = [];
+    for(let d = primeiro; d <= fim || dias.length % 7; d = somar(d, 1)) dias.push(d);
+    corpo = `<div class="pt-grade">${["seg","ter","qua","qui","sex","sáb","dom"].map(x => `<div class="pt-cab">${x}</div>`).join("")}${dias.map(d => {
+      const its = doMes.filter(p => p.data === chaveD(d)), fora = d.getMonth() !== PT.mes, hoje = dif(HOJE, d) === 0;
+      return `<div class="pt-dia ${fora ? "fora" : ""} ${hoje ? "hoje" : ""}" ${!fora && podeEditar() ? `data-pt-dia="${chaveD(d)}"` : ""}><span class="pt-n">${d.getDate()}</span>${its.map(p => `<button class="pt-it" data-pt="${p.id}" style="--c:${REDES[p.rede] || "#636366"}" title="${esc(p.origem + " · " + p.rede + " · " + nomeP(p))}"><i style="background:${(SIT_P[p.situacao] || SIT_P.ajuste)[1]}"></i>${esc(p.origem === "Jabot" ? "J" : "I")} · ${esc(p.rede)}<span>${esc(nomeP(p))}</span></button>`).join("")}</div>`;
+    }).join("")}</div>`;
+  }
+  return `<div class="vista">${topo}${resumo}${corpo}
+    <p class="peq sec" style="margin:16px 0 0">Etiqueta J = Jabot, I = produção interna. A bolinha mostra a situação: <span style="color:#FF9500">●</span> ajuste · <span style="color:#007AFF">●</span> aprovado · <span style="color:#34C759">●</span> postado. ${podeEditar() ? "Clique num dia vazio para adicionar um conteúdo interno nele." : ""}</p></div>`;
+}
+VISTAS.redes = vPauta;
+const abaRedes = ABAS.find(a => a.id === "redes"); if(abaRedes){ abaRedes.nome = "Pauta das redes"; abaRedes.sub = "Planejamento mensal da Jabot e conteúdos produzidos internamente, por rede e por dia."; }
+$("#nav").innerHTML = navHTML();
+
+function abrirPauta(id, padrao){
+  const p = id ? PT.lista.find(x => x.id === id) : {data: chaveD(HOJE), rede: "Instagram", formato: "Feed", origem: "Interna", titulo: "", legenda: "", situacao: "ajuste", responsavel: window.PERFIL && window.PERFIL.nome || "", link: "", demanda_id: null, ...(padrao || {})};
+  if(!p) return;
+  PT.editando = {...p};
+  const ro = !podeEditar(), dis = ro ? "disabled" : "";
+  const op = (l, v) => l.map(o => Array.isArray(o) ? `<option value="${esc(o[0])}" ${v === o[0] ? "selected" : ""}>${esc(o[1])}</option>` : `<option ${v === o ? "selected" : ""}>${esc(o)}</option>`).join("");
+  const dems = DM.lista.filter(d => d.situacao === "ativa").map(d => [d.id, d.titulo]);
+  $("#dlg-corpo").innerHTML = `<form class="dform" id="pt-form" novalidate>
+    <h2 class="h2 larga" style="margin:0">${id ? esc(nomeP(p)) : "Novo conteúdo interno"}</h2>
+    <label>Data<input type="date" name="data" required value="${esc(p.data)}" ${dis}></label>
+    <label>Rede<select name="rede" ${dis}>${op(Object.keys(REDES), p.rede)}</select></label>
+    <label>Formato<select name="formato" ${dis}>${op(FORMATOS, p.formato)}</select></label>
+    <label>Origem<select name="origem" ${dis}>${op(["Interna", "Jabot"], p.origem)}</select></label>
+    <label class="larga">Título curto<input name="titulo" maxlength="200" value="${esc(p.titulo || "")}" ${dis} placeholder="Ex.: Bastidores da montagem do Natal"></label>
+    <label class="larga">Legenda<textarea name="legenda" maxlength="5000" style="min-height:120px" ${dis}>${esc(p.legenda || "")}</textarea></label>
+    <label>Situação<select name="situacao" ${dis}>${op(Object.entries(SIT_P).map(([k, v]) => [k, v[0]]), p.situacao)}</select></label>
+    <label>Responsável<input name="responsavel" maxlength="80" list="pt-pessoas" value="${esc(p.responsavel || "")}" ${dis}><datalist id="pt-pessoas">${pessoas().map(x => `<option value="${esc(x)}">`).join("")}</datalist></label>
+    <label class="larga">Link (post publicado, arquivo no Drive)<input name="link" type="url" maxlength="500" value="${esc(p.link || "")}" ${dis} placeholder="https://"></label>
+    <label class="larga">Demanda ligada<select name="demanda_id" ${dis}><option value="">Nenhuma</option>${op(dems, p.demanda_id || "")}</select></label>
+    <div class="dacoes">${ro ? `<button type="button" class="btn" data-fechar>Fechar</button>` : `<button class="btn primario" type="submit">Salvar</button>${id ? `<button type="button" class="btn texto" data-pt-excluir style="margin-left:auto;color:var(--tijolo)">Excluir</button>` : ""}<button type="button" class="btn texto" data-fechar>Fechar sem salvar</button>`}</div></form>`;
+  if(!$("#dlg").open) $("#dlg").showModal();
+}
+async function salvarPauta(){
+  const fd = new FormData($("#pt-form")), c = {};
+  ["data","rede","formato","origem","titulo","legenda","situacao","responsavel","link","demanda_id"].forEach(k => { c[k] = String(fd.get(k) || "").trim() || null; });
+  if(!c.data){ toast("Escolha a data."); return; }
+  if(c.link && !/^https?:\/\//i.test(c.link)){ toast("O link precisa começar com https://"); return; }
+  const id = PT.editando && PT.editando.id;
+  const r = id ? await sb.from("pauta_redes").update(c).eq("id", id).select().single() : await sb.from("pauta_redes").insert(c).select().single();
+  if(r.error){ toast("Não foi possível salvar: " + r.error.message); return; }
+  const i = PT.lista.findIndex(x => x.id === r.data.id); if(i >= 0) PT.lista[i] = r.data; else PT.lista.push(r.data);
+  $("#dlg").close(); toast(id ? "Conteúdo salvo" : "Conteúdo adicionado"); render();
+}
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("[data-pt],[data-pt-novo],[data-pt-visao],[data-pt-mes],[data-pt-dia],[data-pt-excluir]"); if(!b) return;
+  const ds = b.dataset;
+  if(ds.pt !== undefined){ ev.stopPropagation(); abrirPauta(ds.pt); }
+  else if(ds.ptNovo !== undefined) abrirPauta(null, {data: PT.mes === HOJE.getMonth() && PT.ano === HOJE.getFullYear() ? chaveD(HOJE) : chaveD(new Date(PT.ano, PT.mes, 1))});
+  else if(ds.ptVisao){ PT.visao = ds.ptVisao; LS.set("pt-visao", PT.visao); render(); }
+  else if(ds.ptMes){ let m = PT.mes + +ds.ptMes, a = PT.ano; if(m < 0){ m = 11; a--; } if(m > 11){ m = 0; a++; } PT.mes = m; PT.ano = a; render(); }
+  else if(ds.ptDia && ev.target === b || (ds.ptDia && ev.target.classList.contains("pt-n"))) abrirPauta(null, {data: ds.ptDia});
+  else if(ds.ptExcluir !== undefined){
+    if(!confirm("Excluir este conteúdo da pauta?")) return;
+    const r = await sb.from("pauta_redes").delete().eq("id", PT.editando.id);
+    if(r.error) toast("Não foi possível excluir: " + r.error.message); else { PT.lista = PT.lista.filter(x => x.id !== PT.editando.id); $("#dlg").close(); render(); }
+  }
+});
+document.addEventListener("change", ev => { if(ev.target.id === "pt-rede"){ PT.rede = ev.target.value; render(); } else if(ev.target.id === "pt-origem"){ PT.origem = ev.target.value; render(); } });
+document.addEventListener("submit", ev => { if(ev.target.id !== "pt-form") return; ev.preventDefault(); if(podeEditar()) salvarPauta(); });
+const st2 = document.createElement("style");
+st2.textContent = `.pt-grade{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.pt-cab{font-size:12px;font-weight:600;color:var(--concreto);text-align:center;padding:4px 0}
+.pt-dia{min-height:110px;background:var(--branco);border-radius:12px;padding:6px;display:flex;flex-direction:column;gap:4px;box-shadow:var(--sombra)}
+.pt-dia[data-pt-dia]{cursor:copy}.pt-dia.fora{opacity:.35;box-shadow:none}.pt-dia.hoje{box-shadow:inset 0 0 0 2px var(--madeira)}
+.pt-n{font-size:12px;font-weight:600;color:var(--concreto)}
+.pt-it{display:flex;flex-wrap:wrap;align-items:center;gap:4px;border:0;border-left:3px solid var(--c);background:color-mix(in srgb,var(--c) 10%,var(--branco));border-radius:6px;padding:4px 6px;font-size:11px;font-weight:600;line-height:1.25;font-family:inherit;color:var(--c);text-align:left;cursor:pointer;width:100%}
+.pt-it i{width:7px;height:7px;border-radius:50%;flex:none}.pt-it span{flex-basis:100%;font-weight:500;color:var(--grafite);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:760px){.pt-grade{grid-template-columns:repeat(7,minmax(44px,1fr));overflow-x:auto}.pt-it span{display:none}}`;
+document.head.appendChild(st2);
+
 window.DEMANDAS = {abrirFicha, lista: () => DM.lista};
 render();
 })();
