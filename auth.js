@@ -159,7 +159,7 @@
     sb.rpc("registrar_acesso").then(() => {}, () => {});
     try { await carregarDados(perfil); } catch(e){ return tela("Erro ao carregar", `<p class="sec">${escP(e.message || "Tente recarregar a página.")}</p>`); }
     iniciado = true;
-    await carregarScript("app.js"); await carregarScript("admin.js");
+    await carregarScript("app.js"); await carregarScript("admin.js"); await carregarScript("demandas.js");
     sessionStorage.removeItem("casapark.senha-definida");
     portao.hidden = true; document.body.classList.remove("bloqueado");
     document.body.classList.add("papel-" + perfil.papel);
