@@ -72,7 +72,7 @@ function vUsuarios(){
       <td><select data-adm-papel="${esc(p.user_id)}" ${eu || !p.ativo ? "disabled" : ""} aria-label="Perfil de ${esc(p.nome)}">${Object.keys(NOME_PAPEL).map(k => `<option value="${k}" ${p.papel === k ? "selected" : ""}>${NOME_PAPEL[k]}</option>`).join("")}</select></td>
       <td>${p.ativo ? pill("ok", "Ativo") : pill("neutro", "Desativado")}</td>
       <td class="peq sec tab">${quandoTxt(p.ultimo_acesso)}</td>
-      <td style="text-align:right;white-space:nowrap">${eu ? "" : `<button class="btn texto" data-adm-2fa="${esc(p.user_id)}">Redefinir 2FA</button><button class="btn texto ${p.ativo ? "atraso" : ""}" data-adm-ativo="${esc(p.user_id)}" data-ativo="${p.ativo}">${p.ativo ? "Desativar" : "Reativar"}</button>`}</td></tr>`; }).join("");
+      <td style="text-align:right;white-space:nowrap">${eu ? "" : `${p.ativo ? `<button class="btn texto" data-adm-link="${esc(p.user_id)}" data-nome="${esc(p.nome)}">${p.ultimo_acesso ? "Link de nova senha" : "Novo link"}</button>` : ""}<button class="btn texto" data-adm-2fa="${esc(p.user_id)}">Redefinir 2FA</button><button class="btn texto ${p.ativo ? "atraso" : ""}" data-adm-ativo="${esc(p.user_id)}" data-ativo="${p.ativo}">${p.ativo ? "Desativar" : "Reativar"}</button>`}</td></tr>`; }).join("");
   return `<div class="vista grade">
     <section class="cartao c8"><div class="cab"><h2>Equipe com acesso</h2><span class="peq sec">${plural(ativos.length, "pessoa ativa", "pessoas ativas")} · ${plural(admins, "administrador", "administradores")}</span></div>
       <div class="rolar"><table><thead><tr><th>Pessoa</th><th>Perfil</th><th>Situação</th><th>Último acesso</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>
@@ -83,13 +83,13 @@ function vUsuarios(){
           <label><span class="rotulo">Nome</span><input type="text" name="nome" required maxlength="120"></label>
           <label><span class="rotulo">E-mail</span><input type="email" name="email" required maxlength="254"></label>
           <label><span class="rotulo">Perfil</span><select name="papel">${["leitor","editor","admin"].map(k => `<option value="${k}">${NOME_PAPEL[k]} · ${DESC_PAPEL[k]}</option>`).join("")}</select></label>
-          <button class="btn primario" type="submit">${icone("i-mais", "p")}Enviar convite</button></form>
-        ${alerta("A pessoa recebe um e-mail, cria a própria senha e ativa a verificação em duas etapas no primeiro acesso.")}</section>
+          <button class="btn primario" type="submit">${icone("i-mais", "p")}Criar convite</button></form>
+        ${alerta("O sistema gera um link de convite para você enviar pelo WhatsApp. A pessoa abre o link, cria a própria senha e ativa a verificação em duas etapas no primeiro acesso.")}</section>
       <section class="cartao"><div class="cab"><h2>O que cada perfil pode fazer</h2></div><ul class="leg-lista">${Object.keys(NOME_PAPEL).map(k => `<li><span><b>${NOME_PAPEL[k]}</b><div class="peq sec">${DESC_PAPEL[k]}</div></span></li>`).join("")}</ul></section>
     </div></div>`;
 }
 
-const ROT_ACAO = {INSERT: "criou", UPDATE: "alterou", DELETE: "apagou", CONVITE: "convidou", DESATIVAR: "desativou", REATIVAR: "reativou", REDEFINIR_2FA: "redefiniu o 2FA de"};
+const ROT_ACAO = {INSERT: "criou", UPDATE: "alterou", DELETE: "apagou", CONVITE: "convidou", NOVO_LINK: "gerou novo link de acesso para", DESATIVAR: "desativou", REATIVAR: "reativou", REDEFINIR_2FA: "redefiniu o 2FA de"};
 const ROT_TAB = {ajustes: "ajuste", arquivos: "planilha", perfis: "perfil", usuarios: "usuário"};
 function resumoAud(a){
   if(a.tabela === "ajustes"){ const [t, id] = (a.chave || "").split(/:(.*)/); const v = a.depois && a.depois.valor; const rot = {status: "status da tarefa", resp: "responsável do item", respT: "responsável da tarefa", demanda: "demanda"}[t] || t;
@@ -140,9 +140,39 @@ document.addEventListener("click", async ev => {
 document.addEventListener("submit", async ev => {
   if(ev.target.id !== "f-convite") return; ev.preventDefault();
   const f = new FormData(ev.target); const btn = ev.target.querySelector("button"); btn.disabled = true;
-  try { await chamarFuncao({acao: "convidar", nome: String(f.get("nome")).trim(), email: String(f.get("email")).trim(), papel: f.get("papel")}); toast("Convite enviado"); ev.target.reset(); await carregarPerfis(); render(); }
-  catch(e){ toast(e.message); }
+  try {
+    const nome = String(f.get("nome")).trim();
+    const r = await chamarFuncao({acao: "convidar", nome, email: String(f.get("email")).trim(), papel: f.get("papel")});
+    ev.target.reset(); await carregarPerfis(); render();
+    mostrarLink(nome, r && r.link, "invite");
+  } catch(e){ toast(e.message); }
   btn.disabled = false;
 });
 document.addEventListener("input", ev => { if(ev.target.id === "adm-q"){ ADM.filtro = ev.target.value; const p = ev.target.selectionStart; render(); const el = $("#adm-q"); el.focus(); el.setSelectionRange(p, p); } });
 render();
+
+/* ---------- link de convite para enviar pelo WhatsApp ---------- */
+function mostrarLink(nome, link, tipo){
+  if(!link){ toast("Convite criado, mas o link não veio. Use “Novo link” na lista."); return; }
+  const primeiro = String(nome || "").split(/\s+/)[0] || "";
+  const msg = tipo === "recovery"
+    ? `Oi${primeiro ? ", " + primeiro : ""}! Aqui está o link para criar uma nova senha no sistema de gestão do Casapark: ${link}`
+    : `Oi${primeiro ? ", " + primeiro : ""}! Seu acesso ao sistema de gestão do Casapark está pronto. Abra este link para criar sua senha: ${link}\n\nNo primeiro acesso, tenha no celular um app autenticador (Google Authenticator, Microsoft Authenticator ou o app Senhas do iPhone) para ativar a verificação em duas etapas.`;
+  $("#dlg-corpo").innerHTML = `<h2 class="h2" style="margin-bottom:8px">${tipo === "recovery" ? "Link de nova senha" : "Convite criado"}${primeiro ? " para " + esc(primeiro) : ""}</h2>
+    <p class="sec" style="margin:0 0 16px">Envie a mensagem abaixo pelo WhatsApp. O link é pessoal e vale por tempo limitado: se expirar, gere outro em <b>Novo link</b>. Não publique em grupos.</p>
+    <textarea id="adm-msg" readonly style="width:100%;min-height:150px;font:inherit;padding:12px;border-radius:12px;border:1px solid var(--areia);background:var(--suave);color:var(--grafite)">${esc(msg)}</textarea>
+    <div class="linha" style="margin-top:16px;gap:8px;flex-wrap:wrap">
+      <a class="btn primario" href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">Abrir no WhatsApp</a>
+      <button class="btn" type="button" data-adm-copiar>Copiar mensagem</button>
+      <button class="btn texto" type="button" data-fechar>Fechar</button></div>`;
+  if(!$("#dlg").open) $("#dlg").showModal();
+}
+document.addEventListener("click", async ev => {
+  const c = ev.target.closest("[data-adm-copiar]");
+  if(c){ const t = $("#adm-msg"); try { await navigator.clipboard.writeText(t.value); toast("Mensagem copiada"); } catch(e){ t.select(); document.execCommand("copy"); toast("Mensagem copiada"); } return; }
+  const b = ev.target.closest("[data-adm-link]"); if(!b) return;
+  b.disabled = true;
+  try { const r = await chamarFuncao({acao: "novo_link", user_id: b.dataset.admLink}); mostrarLink(b.dataset.nome, r && r.link, r && r.tipo); }
+  catch(e){ toast(e.message); }
+  b.disabled = false;
+});
