@@ -1426,7 +1426,7 @@ const _renderBase = render;
 render = function(){
   _renderBase();
   const aba = ABAS.find(a => a.id === S.aba) || ABAS[0];
-  $("main").dataset.aba = aba.id;
+  $("main").dataset.tela = aba.id;   // não usar data-aba aqui: qualquer clique na tela seria lido como troca de aba
   const mg = $("#migalha-aba"); if(mg) mg.textContent = aba.nome;
   contar();
 };
