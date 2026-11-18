@@ -145,11 +145,15 @@
     if(tipoLink === "invite" || tipoLink === "recovery"){
       if(!sessionStorage.getItem("casapark.senha-definida")){ sessionStorage.setItem("casapark.senha-definida", "1"); return telaNovaSenha(tipoLink === "invite"); }
     }
+    // verificação em duas etapas: obrigatória para administradores; opcional para editores e leitores
+    // (quem já ativou o app continua precisando do código)
     const {data: aal} = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
     if(aal.currentLevel !== "aal2"){
       const {data: lf} = await sb.auth.mfa.listFactors();
       const totp = (lf && lf.totp || []).find(f => f.status === "verified");
-      return totp ? telaCodigoMfa(totp.id) : telaCadastroMfa();
+      if(totp) return telaCodigoMfa(totp.id);
+      const {data: p0} = await sb.from("perfis").select("papel, ativo").eq("user_id", session.user.id).maybeSingle();
+      if(!p0 || p0.papel === "admin") return telaCadastroMfa();   // administrador (o banco só mostra o perfil depois do código)
     }
     if(iniciado) return;
     tela("Carregando…", `<p class="sec">Buscando os dados do Casapark com segurança.</p>`);
